@@ -1,26 +1,152 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  /* Surface & Main Colors - Clean Neutral Base */
+  --background: #FAFAFA;
+  --foreground: #0F172A;
+
+  --card: #FFFFFF;
+  --card-foreground: #0F172A;
+
+  --sidebar: #FFFFFF;
+  --sidebar-foreground: #334155;
+
+  /* Brand Color - High-leverage Teal */
+  --brand-blue: #02C394;
+  --brand-purple: #475569;
+  --brand-green: #02C394;
+
+  /* Feature Colors - Subtle variants */
+  --success: #02C394;
+  --success-bg: #F0FDFA;
+  --warning: #F59E0B;
+  --warning-bg: #FFFBEB;
+  --danger: #EF4444;
+  --danger-bg: #FEF2F2;
+  --info: #02C394;
+  --info-bg: #F1FFFC;
+
+  /* Neutrals - Roboflow inspired palette */
+  --text-primary: #0F172A;
+  --text-secondary: #475569;
+  --text-muted: #94A3B8;
+
+  --border: #E2E8F0;
+  --border-subtle: #F5F5F5;
+  --input: #FAFAFA;
+  --muted-bg: #F5F5F5;
+
+  /* Shadows & Radius - Professional & Subtle */
+  --radius-xl: 0.75rem;
+  --shadow-sm: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1);
+}
+
+[data-theme='dark'] {
+  --background: #101828;
+  --foreground: #FFFFFF;
+
+  --card: #1D2939;
+  --card-foreground: #FFFFFF;
+
+  --sidebar: #101828;
+  --sidebar-foreground: #FFFFFF;
+
+  --brand-blue: #02C394;
+  --brand-purple: #6A7282;
+
+  /* Feature Colors (Dark adjusted) */
+  --success: #02C394;
+  --success-bg: rgba(2, 195, 148, 0.15);
+  --warning: #FFAB00;
+  --warning-bg: rgba(255, 171, 0, 0.15);
+  --danger: #FF5252;
+  --danger-bg: rgba(255, 82, 82, 0.15);
+  --info: #02C394;
+  --info-bg: rgba(2, 195, 148, 0.15);
+
+  /* Neutrals (Dark) */
+  --text-primary: #FFFFFF;
+  --text-secondary: #99A1AF;
+  --text-muted: #6A7282;
+
+  --border: #364153;
+  --border-subtle: #1D2939;
+  --input: #101828;
+  --muted-bg: #1D2939;
+
+  --shadow-sm: none;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+
+  --color-sidebar: var(--sidebar);
+
+  --color-brand-blue: var(--brand-blue);
+  --color-brand-purple: var(--brand-purple);
+  --color-brand-green: var(--brand-green);
+  --color-brand-gray: var(--text-secondary);
+
+  --color-success: var(--success);
+  --color-success-background: var(--success-bg);
+  --color-warning: var(--warning);
+  --color-warning-background: var(--warning-bg);
+  --color-danger: var(--danger);
+  --color-danger-background: var(--danger-bg);
+  --color-info: var(--info);
+  --color-info-background: var(--info-bg);
+
+  --color-border: var(--border);
+  --color-border-subtle: var(--border-subtle);
+
+  --color-muted: var(--text-secondary);
+  --color-muted-foreground: var(--text-muted);
+  --color-muted-background: var(--muted-bg);
+
+  --radius-xl: var(--radius-xl);
+
+  --shadow-card: var(--shadow-sm);
+
+  --font-satoshi: "Satoshi", "Inter", system-ui, sans-serif;
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-satoshi);
+  transition: background-color 0.3s ease, color 0.3s ease;
+  -webkit-font-smoothing: antialiased;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--background);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border: 2px solid var(--background);
+  border-radius: 10px;
+}
+
+/* Video Control Refinements */
+video::-webkit-media-controls-play-button,
+video::-webkit-media-controls-current-time-display,
+video::-webkit-media-controls-time-remaining-display,
+video::-webkit-media-controls-mute-button,
+video::-webkit-media-controls-fullscreen-button {
+  filter: sepia(1) saturate(5) hue-rotate(120deg) brightness(0.9);
+  /* Attempts to match #02C394 Teal */
+}
+
+video::-webkit-media-controls-timeline {
+  background-color: rgba(2, 195, 148, 0.2);
+  border-radius: 10px;
 }
