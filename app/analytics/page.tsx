@@ -44,14 +44,32 @@ interface StatsData {
     total_frames: number;
 }
 
-const FALLBACK_COUNTRIES: CountryStat[] = [
-    { rank: 1, code: "NG", submissions: 2041367, activityPercent: 88 },
-    { rank: 2, code: "ID", submissions: 476530, activityPercent: 32 },
-    { rank: 3, code: "IN", submissions: 76385, activityPercent: 12 },
-    { rank: 4, code: "none", submissions: 45909, activityPercent: 8 },
-    { rank: 5, code: "PK", submissions: 37775, activityPercent: 6 },
-    { rank: 6, code: "BD", submissions: 31356, activityPercent: 5 },
-];
+/**
+ * Share of the national total for each state, as whole tenths of a percent.
+ *
+ * Rounding each share independently lets the column land on 99.9 or 100.1, so
+ * the remainder is apportioned by the largest-remainder method: the column
+ * always sums to exactly 100.0%.
+ */
+function toSharesOfTotal(values: number[]): number[] {
+    const total = values.reduce((acc, v) => acc + v, 0);
+    if (total <= 0) return values.map(() => 0);
+
+    const SCALE = 1000; // tenths of a percent
+    const exact = values.map((v) => (v / total) * SCALE);
+    const floors = exact.map(Math.floor);
+    let remainder = SCALE - floors.reduce((acc, v) => acc + v, 0);
+
+    const order = exact
+        .map((value, index) => ({ index, frac: value - Math.floor(value) }))
+        .sort((a, b) => b.frac - a.frac);
+
+    for (let i = 0; remainder > 0 && i < order.length; i += 1, remainder -= 1) {
+        floors[order[i].index] += 1;
+    }
+
+    return floors.map((tenths) => tenths / 10);
+}
 
 export default function AnalyticsPage() {
     const [isRefreshing, setIsRefreshing] = useState(false);
@@ -62,7 +80,6 @@ export default function AnalyticsPage() {
     const [totalKm, setTotalKm] = useState("1,208,628");
     const [globalUserbase, setGlobalUserbase] = useState("83,572");
     const [activeCountries, setActiveCountries] = useState("32");
-    const [countriesData] = useState<CountryStat[]>(FALLBACK_COUNTRIES);
 
     // India-specific analytics
     const [indiaSubmissions, setIndiaSubmissions] = useState(0);
@@ -105,18 +122,16 @@ export default function AnalyticsPage() {
         });
     };
 
-    // Use India state data for geographic table if available, else fallback
-    const displayData: CountryStat[] = indiaStates.length > 0
-        ? indiaStates.map((st, idx) => {
-            const maxSubs = indiaStates[0]?.total_submissions || 1;
-            return {
-                rank: idx + 1,
-                code: st.state,
-                submissions: st.total_submissions,
-                activityPercent: Math.round((st.total_submissions / maxSubs) * 100),
-            };
-        })
-        : countriesData;
+    // Each state's share of all India submissions, so the column totals 100%.
+    const displayData: CountryStat[] = (() => {
+        const shares = toSharesOfTotal(indiaStates.map((st) => st.total_submissions));
+        return indiaStates.map((st, idx) => ({
+            rank: idx + 1,
+            code: st.state,
+            submissions: st.total_submissions,
+            activityPercent: shares[idx],
+        }));
+    })();
 
     const tableTitle = indiaStates.length > 0 ? "India State-wise Reach" : "Geographic Reach";
     const tableSubtitle = indiaStates.length > 0 ? "SUBMISSIONS BY INDIAN STATE" : "SUBMISSIONS BY COUNTRY";
@@ -250,8 +265,8 @@ export default function AnalyticsPage() {
                                                                 style={{ width: `${item.activityPercent}%` }}
                                                             />
                                                         </div>
-                                                        <span className="text-[10px] font-bold text-muted-foreground font-mono w-8 text-right">
-                                                            {item.activityPercent}%
+                                                        <span className="text-[10px] font-bold text-muted-foreground font-mono w-11 text-right">
+                                                            {item.activityPercent.toFixed(1)}%
                                                         </span>
                                                     </div>
                                                 </td>
