@@ -15,17 +15,18 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" data-theme="dark" suppressHydrationWarning>
+    <html lang="en" data-theme="light" suppressHydrationWarning>
       <head>
         <script
           dangerouslySetInnerHTML={{
             __html: `
               (function() {
+                // The admin console ships as a light-only surface, so any
+                // previously stored 'dark' preference is cleared on boot.
                 try {
-                  var saved = localStorage.getItem('theme');
-                  var theme = saved || 'dark';
-                  document.documentElement.setAttribute('data-theme', theme);
+                  localStorage.setItem('theme', 'light');
                 } catch (e) {}
+                document.documentElement.setAttribute('data-theme', 'light');
               })();
             `,
           }}

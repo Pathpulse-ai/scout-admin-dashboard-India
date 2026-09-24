@@ -13,7 +13,7 @@ interface PageHeaderProps {
 const PageHeader = ({ title, subtitle, actions }: PageHeaderProps) => {
     const { setIsOpen } = useSidebar();
     return (
-        <header className="py-4 sm:py-6 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 sticky top-0 bg-background/80 backdrop-blur-md z-30">
+        <header className="py-4 sm:py-6 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 sticky top-0 backdrop-blur-md z-30">
             <div className="flex items-center gap-3 sm:gap-4 w-full sm:w-auto">
                 <button
                     onClick={() => setIsOpen(true)}
@@ -23,10 +23,10 @@ const PageHeader = ({ title, subtitle, actions }: PageHeaderProps) => {
                     <Menu className="w-5 h-5" />
                 </button>
                 <div className="min-w-0 flex-1">
-                    <p className="text-[10px] sm:text-xs font-bold text-brand-gray uppercase tracking-widest mb-0.5 sm:mb-1 truncate">
+                    <p className="text-[10px] sm:text-xs font-bold text-black uppercase tracking-widest mb-0.5 sm:mb-1 truncate">
                         {subtitle}
                     </p>
-                    <h2 className="text-xl sm:text-3xl font-extrabold text-foreground tracking-tight truncate">
+                    <h2 className="text-xl sm:text-3xl font-extrabold text-black tracking-tight truncate">
                         {title}
                     </h2>
                 </div>

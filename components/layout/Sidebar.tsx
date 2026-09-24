@@ -4,48 +4,48 @@ import React from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
-    Home,
-    ActivitySquare,
+    LayoutDashboard,
+    Scan,
     Users,
-    ShieldAlert,
     X,
     ChevronLeft,
     ChevronRight,
-    Trophy,
-    BarChart2,
-    FileText,
-    Globe
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const navigationItems = [
     {
-        id: "detections",
-        label: "Detections",
-        icon: ActivitySquare,
-        href: "/detections",
-    },
-    {
         id: "analytics",
-        label: "Scout Analytics",
-        icon: Globe,
+        label: "Dashboard",
+        icon: LayoutDashboard,
         href: "/analytics",
     },
     {
-        id: "fraud",
-        label: "Fraud Feed",
-        icon: ShieldAlert,
-        href: "/fraud",
+        id: "detections",
+        label: "Detections",
+        icon: Scan,
+        href: "/detections",
     },
     {
-        id: "admin-leaderboard",
-        label: "Leaderboard",
-        icon: BarChart2,
-        href: "/leaderboard",
+        id: "users",
+        label: "User Discovery",
+        icon: Users,
+        href: "/users",
     },
 ];
 
-const filteredNavigationItems = navigationItems;
+const BrandMark = ({ className }: { className?: string }) => (
+    <div
+        className={cn(
+            "rounded-xl bg-gradient-to-br from-[#00DF89] to-[#02A878] flex items-center justify-center shrink-0",
+            className
+        )}
+    >
+        <svg viewBox="0 0 24 24" fill="none" className="w-[60%] h-[60%]" stroke="#04140D" strokeWidth={2.4} strokeLinecap="round" strokeLinejoin="round">
+            <path d="M3 12.5h3.6L9 6.5l3.2 11 2.6-5h3.7" />
+        </svg>
+    </div>
+);
 
 interface SidebarProps {
     isOpen: boolean;
@@ -67,112 +67,125 @@ const Sidebar = ({ isOpen, setIsOpen, isCollapsed, setIsCollapsed }: SidebarProp
                 />
             )}
 
-            {/* Sidebar */}
+            {/* Sidebar Container */}
             <aside
                 className={cn(
-                    "fixed lg:static inset-y-0 left-0 z-50 bg-sidebar flex flex-col border-r border-border-subtle transition-all duration-300 ease-in-out",
+                    "fixed lg:static inset-y-0 left-0 z-50 bg-[#050B18] border-r border-white/[0.06] flex flex-col transition-all duration-300 ease-in-out shrink-0 select-none",
                     isOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0",
-                    isCollapsed ? "w-20" : "w-64"
+                    isCollapsed ? "w-[72px]" : "w-64"
                 )}
             >
-                {/* Logo Section */}
-                <div className={cn("p-8 transition-all duration-300", isCollapsed ? "p-4 flex flex-col items-center" : "p-8")}>
-                    <div className="flex items-center justify-between w-full">
-                        <div className={cn("flex flex-col transition-all duration-300", isCollapsed ? "hidden" : "flex")}>
-                            <h1 className="text-2xl font-bold text-brand-blue tracking-tight">
-                                PathPulse<span className="text-brand-green">.ai</span> IN
-                            </h1>
-                            <p className="text-xs text-brand-gray font-medium uppercase tracking-widest mt-1">
-                                Admin Console
-                            </p>
+                {/* Brand */}
+                <div
+                    className={cn(
+                        "h-16 flex items-center border-b border-white/[0.06]",
+                        isCollapsed ? "justify-center px-0" : "px-5"
+                    )}
+                >
+                    {isCollapsed ? (
+                        <Link href="/analytics" aria-label="PathPulse.ai Admin Console">
+                            <BrandMark className="w-9 h-9" />
+                        </Link>
+                    ) : (
+                        <div className="flex items-center justify-between w-full gap-3">
+                            <Link href="/analytics" className="flex items-center gap-3 min-w-0">
+                                <BrandMark className="w-9 h-9" />
+                                <span className="flex flex-col min-w-0 leading-none">
+                                    <span className="text-[15px] font-bold text-white tracking-tight truncate">
+                                        PathPulse.ai
+                                    </span>
+                                    <span className="text-[11px] text-slate-400 font-medium truncate mt-1">
+                                        Admin Console India
+                                    </span>
+                                </span>
+                            </Link>
+                            <button
+                                onClick={() => setIsOpen(false)}
+                                className="lg:hidden p-1.5 -mr-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors"
+                                aria-label="Close sidebar"
+                            >
+                                <X className="w-5 h-5" />
+                            </button>
                         </div>
-                        {isCollapsed && (
-                            <h1 className="text-2xl font-bold text-brand-blue tracking-tight">
-                                P<span className="text-brand-green">.</span>
-                            </h1>
-                        )}
-                        <button
-                            onClick={() => setIsOpen(false)}
-                            className="lg:hidden p-2 rounded-lg hover:bg-background text-brand-gray transition-colors cursor-pointer"
-                        >
-                            <X className="w-5 h-5" />
-                        </button>
-                    </div>
+                    )}
                 </div>
 
                 {/* Navigation */}
-                <nav className="flex-1 px-4 space-y-2 overflow-y-auto">
-                    {filteredNavigationItems.map((item) => {
+                <nav className={cn("flex-1 py-4 space-y-1 overflow-y-auto", isCollapsed ? "px-3" : "px-3")}>
+                    {!isCollapsed && (
+                        <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-[0.12em] px-3 pb-2">
+                            Overview
+                        </p>
+                    )}
+                    {navigationItems.map((item) => {
                         const Icon = item.icon;
                         const isActive =
                             pathname === item.href ||
-                            (item.id === "admin-leaderboard" && (pathname === "/admin/leaderboard" || pathname === "/leaderboard")) ||
-                            (item.id === "admin-winners" && (pathname === "/admin/winners" || pathname === "/winners"));
+                            (item.id === "analytics" && (pathname === "/analytics" || pathname === "/dashboard"));
 
                         return (
-                            <div key={item.id} className="flex flex-col">
-                                <Link
-                                    href={item.href !== "#" ? item.href : "#"}
-                                    onClick={(e) => {
-                                        if (item.href === "#") e.preventDefault();
-                                        if (item.href !== "#") setIsOpen(false);
-                                    }}
-                                    title={isCollapsed ? item.label : ""}
+                            <Link
+                                key={item.id}
+                                href={item.href}
+                                onClick={() => setIsOpen(false)}
+                                title={isCollapsed ? item.label : undefined}
+                                aria-current={isActive ? "page" : undefined}
+                                className={cn(
+                                    "flex items-center rounded-lg text-sm transition-colors duration-150 group",
+                                    isCollapsed ? "justify-center h-10" : "gap-3 px-3 h-10",
+                                    isActive
+                                        ? "bg-[#00DF89]/10 text-[#00DF89] font-semibold"
+                                        : "text-slate-400 hover:text-white hover:bg-white/[0.05] font-medium"
+                                )}
+                            >
+                                <Icon
                                     className={cn(
-                                        "flex items-center px-4 py-3 rounded-xl transition-all duration-200 group relative",
-                                        isCollapsed ? "justify-center px-2" : "gap-4 px-4",
-                                        isActive && item.href !== "#"
-                                            ? "bg-background text-brand-blue font-bold shadow-sm"
-                                            : "text-brand-gray hover:bg-background hover:text-brand-blue"
+                                        "w-[18px] h-[18px] shrink-0",
+                                        isActive ? "text-[#00DF89]" : "text-slate-500 group-hover:text-white"
                                     )}
-                                >
-                                    {isActive && !isCollapsed && item.href !== "#" && (
-                                        <div className="absolute right-0 top-3 bottom-3 w-1 bg-brand-green rounded-full" />
-                                    )}
-                                    <Icon
-                                        className={cn(
-                                            "w-5 h-5 transition-colors shrink-0",
-                                            isActive && item.href !== "#" ? "text-brand-green" : "text-brand-gray group-hover:text-brand-blue"
-                                        )}
-                                    />
-                                    {!isCollapsed && <span className="text-sm font-medium whitespace-nowrap overflow-hidden">{item.label}</span>}
-                                </Link>
-                            </div>
+                                />
+                                {!isCollapsed && (
+                                    <span className="truncate tracking-tight">{item.label}</span>
+                                )}
+                            </Link>
                         );
                     })}
                 </nav>
 
-                {/* Footer info/Settings link */}
-                <div className={cn("border-t border-border-subtle transition-all duration-300", isCollapsed ? "p-4" : "p-6")}>
+                {/* Footer */}
+                <div className={cn("border-t border-white/[0.06] p-3", isCollapsed && "flex justify-center")}>
                     <Link
                         href="/settings"
                         onClick={() => setIsOpen(false)}
+                        title={isCollapsed ? "PathPulse Enterprise Platform" : undefined}
                         className={cn(
-                            "flex items-center p-2 rounded-xl transition-all duration-200 hover:bg-background group",
-                            isCollapsed ? "justify-center" : "gap-3"
+                            "flex items-center rounded-lg transition-colors duration-150 hover:bg-white/[0.05] group",
+                            isCollapsed ? "justify-center w-10 h-10" : "gap-3 px-2 py-2"
                         )}
                     >
-                        <div className="w-10 h-10 rounded-xl bg-brand-blue flex items-center justify-center text-white font-bold shrink-0">
-                            AD
+                        <div className="w-8 h-8 rounded-lg bg-white/[0.07] border border-white/10 flex items-center justify-center text-[#00DF89] font-bold text-[11px] shrink-0">
+                            PP
                         </div>
                         {!isCollapsed && (
-                            <div className="flex flex-col overflow-hidden">
-                                <span className="text-sm font-bold text-brand-blue leading-none truncate group-hover:text-brand-green">
-                                    admin
+                            <div className="flex flex-col min-w-0 leading-none">
+                                <span className="text-[13px] font-semibold text-white truncate group-hover:text-[#00DF89] transition-colors">
+                                    PathPulse
                                 </span>
-                                <span className="text-xs text-brand-gray mt-1 truncate">Settings</span>
+                                <span className="text-[11px] text-slate-500 truncate mt-1 font-medium">
+                                    Enterprise Platform
+                                </span>
                             </div>
                         )}
                     </Link>
                 </div>
 
-                {/* Collapse Toggle Button (Desktop Only) */}
+                {/* Desktop Collapse Toggle */}
                 <button
                     onClick={() => setIsCollapsed(!isCollapsed)}
-                    className="hidden lg:flex absolute -right-3 top-20 w-6 h-6 bg-card border border-border-subtle rounded-full items-center justify-center text-brand-gray hover:text-brand-blue shadow-sm z-50 transition-colors cursor-pointer"
+                    className="hidden lg:flex absolute -right-3 top-[60px] w-6 h-6 bg-[#0B1528] border border-white/10 rounded-full items-center justify-center text-slate-400 hover:text-white hover:border-[#00DF89]/50 z-50 transition-colors cursor-pointer"
                     aria-label={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
                 >
-                    {isCollapsed ? <ChevronRight className="w-4 h-4" /> : <ChevronLeft className="w-4 h-4" />}
+                    {isCollapsed ? <ChevronRight className="w-3.5 h-3.5" /> : <ChevronLeft className="w-3.5 h-3.5" />}
                 </button>
             </aside>
         </>

@@ -24,7 +24,7 @@ const MainLayout = ({ children }: MainLayoutProps) => {
     }
 
     return (
-        <div className="flex h-screen overflow-hidden bg-background text-foreground">
+        <div className="flex h-screen overflow-hidden bg-[#F5F7FB] text-foreground">
             <Sidebar
                 isOpen={isOpen}
                 setIsOpen={setIsOpen}
@@ -33,7 +33,7 @@ const MainLayout = ({ children }: MainLayoutProps) => {
             />
 
             <div className="flex-1 flex flex-col min-w-0 overflow-hidden relative">
-                <main id="main-content" className="flex-1 overflow-y-auto overflow-x-hidden px-4 md:px-6 lg:px-8 py-4">
+                <main id="main-content" className="flex-1 bg-[#F5F7FB] overflow-y-auto overflow-x-hidden px-4 md:px-6 lg:px-8 py-4">
                     {children}
                 </main>
             </div>

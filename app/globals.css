@@ -1,78 +1,75 @@
 @import "tailwindcss";
 
 :root {
-  /* Surface & Main Colors - Clean Neutral Base */
-  --background: #FAFAFA;
+  /* Surface & Main Colors - PathPulse.ai Admin Console Light Theme */
+  --background: #F5F7FB;
   --foreground: #0F172A;
 
   --card: #FFFFFF;
   --card-foreground: #0F172A;
 
-  --sidebar: #FFFFFF;
-  --sidebar-foreground: #334155;
+  --sidebar: #050B18;
+  --sidebar-foreground: #94A3B8;
 
-  /* Brand Color - High-leverage Teal */
-  --brand-blue: #02C394;
+  /* Brand Colors */
+  --brand-blue: #00DF89;
+  --brand-green: #00DF89;
   --brand-purple: #475569;
-  --brand-green: #02C394;
 
-  /* Feature Colors - Subtle variants */
-  --success: #02C394;
-  --success-bg: #F0FDFA;
+  /* Feature Colors */
+  --success: #00DF89;
+  --success-bg: #E6FAF2;
   --warning: #F59E0B;
-  --warning-bg: #FFFBEB;
+  --warning-bg: #FEF3C7;
   --danger: #EF4444;
-  --danger-bg: #FEF2F2;
-  --info: #02C394;
-  --info-bg: #F1FFFC;
+  --danger-bg: #FEE2E2;
+  --info: #3B82F6;
+  --info-bg: #EFF6FF;
 
-  /* Neutrals - Roboflow inspired palette */
+  /* Neutrals */
   --text-primary: #0F172A;
-  --text-secondary: #475569;
+  --text-secondary: #64748B;
   --text-muted: #94A3B8;
 
   --border: #E2E8F0;
-  --border-subtle: #F5F5F5;
-  --input: #FAFAFA;
-  --muted-bg: #F5F5F5;
+  --border-subtle: #EEF2F6;
+  --input: #FFFFFF;
+  --muted-bg: #F8FAFC;
 
-  /* Shadows & Radius - Professional & Subtle */
-  --radius-xl: 0.75rem;
-  --shadow-sm: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1);
+  --radius-xl: 1rem;
+  --shadow-sm: 0 1px 3px 0 rgb(0 0 0 / 0.05), 0 1px 2px -1px rgb(0 0 0 / 0.05);
 }
 
 [data-theme='dark'] {
-  --background: #101828;
+  --background: #090E17;
   --foreground: #FFFFFF;
 
-  --card: #1D2939;
-  --card-foreground: #FFFFFF;
+  --card: #FFFFFF;
+  --card-foreground: #0F172A;
 
-  --sidebar: #101828;
-  --sidebar-foreground: #FFFFFF;
+  --sidebar: #050B18;
+  --sidebar-foreground: #94A3B8;
 
-  --brand-blue: #02C394;
-  --brand-purple: #6A7282;
+  --brand-blue: #00DF89;
+  --brand-green: #00DF89;
 
-  /* Feature Colors (Dark adjusted) */
-  --success: #02C394;
-  --success-bg: rgba(2, 195, 148, 0.15);
-  --warning: #FFAB00;
-  --warning-bg: rgba(255, 171, 0, 0.15);
-  --danger: #FF5252;
-  --danger-bg: rgba(255, 82, 82, 0.15);
-  --info: #02C394;
-  --info-bg: rgba(2, 195, 148, 0.15);
+  --success: #00DF89;
+  --success-bg: rgba(0, 223, 137, 0.15);
+  --warning: #F59E0B;
+  --warning-bg: rgba(245, 158, 11, 0.15);
+  --danger: #EF4444;
+  --danger-bg: rgba(239, 68, 68, 0.15);
+  --info: #3B82F6;
+  --info-bg: rgba(59, 130, 246, 0.15);
 
-  /* Neutrals (Dark) */
   --text-primary: #FFFFFF;
-  --text-secondary: #99A1AF;
-  --text-muted: #6A7282;
+  --text-secondary: #94A3B8;
+  --text-muted: #64748B;
 
-  --border: #364153;
-  --border-subtle: #1D2939;
-  --input: #101828;
-  --muted-bg: #1D2939;
+  --border: #1F2937;
+  --border-subtle: #162032;
+  --input: #111827;
+  --muted-bg: #162032;
 
   --shadow-sm: none;
 }
@@ -85,9 +82,9 @@
   --color-card-foreground: var(--card-foreground);
 
   --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
 
   --color-brand-blue: var(--brand-blue);
-  --color-brand-purple: var(--brand-purple);
   --color-brand-green: var(--brand-green);
   --color-brand-gray: var(--text-secondary);
 
@@ -108,7 +105,6 @@
   --color-muted-background: var(--muted-bg);
 
   --radius-xl: var(--radius-xl);
-
   --shadow-card: var(--shadow-sm);
 
   --font-satoshi: "Satoshi", "Inter", system-ui, sans-serif;
@@ -118,35 +114,24 @@ body {
   background: var(--background);
   color: var(--foreground);
   font-family: var(--font-satoshi);
-  transition: background-color 0.3s ease, color 0.3s ease;
+  transition: background-color 0.2s ease, color 0.2s ease;
   -webkit-font-smoothing: antialiased;
 }
 
 ::-webkit-scrollbar {
-  width: 8px;
+  width: 6px;
+  height: 6px;
 }
 
 ::-webkit-scrollbar-track {
-  background: var(--background);
+  background: transparent;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: var(--border);
-  border: 2px solid var(--background);
-  border-radius: 10px;
+  background: #CBD5E1;
+  border-radius: 9999px;
 }
 
-/* Video Control Refinements */
-video::-webkit-media-controls-play-button,
-video::-webkit-media-controls-current-time-display,
-video::-webkit-media-controls-time-remaining-display,
-video::-webkit-media-controls-mute-button,
-video::-webkit-media-controls-fullscreen-button {
-  filter: sepia(1) saturate(5) hue-rotate(120deg) brightness(0.9);
-  /* Attempts to match #02C394 Teal */
-}
-
-video::-webkit-media-controls-timeline {
-  background-color: rgba(2, 195, 148, 0.2);
-  border-radius: 10px;
+[data-theme='dark'] ::-webkit-scrollbar-thumb {
+  background: #334155;
 }
