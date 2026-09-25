@@ -6,6 +6,7 @@ import { usePathname } from "next/navigation";
 import {
     LayoutDashboard,
     Scan,
+    Upload,
     Users,
     X,
     ChevronLeft,
@@ -31,6 +32,12 @@ const navigationItems = [
         label: "Detections",
         icon: Scan,
         href: "/detections",
+    },
+    {
+        id: "video-upload",
+        label: "Video upload",
+        icon: Upload,
+        href: "/video-upload",
     },
 ];
 
