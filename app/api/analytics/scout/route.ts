@@ -1,10 +1,8 @@
 import { NextResponse } from 'next/server';
-import { pool, resolveIndianState } from '@/lib/db';
-import { REGION_COUNTRY_CODE, indiaGeoPredicate } from '@/lib/region';
+import { pool } from '@/lib/db';
 
 export async function GET() {
   try {
-    // 1. Fetch Indian submissions with user and detection attributes
     const { rows: submissions } = await pool.query(`
       SELECT 
         s.id,
@@ -15,17 +13,16 @@ export async function GET() {
         s.longitude,
         s.verification_status,
         s.captured_at,
-        u.username
+        u.username,
+        COALESCE(u.country_code, 'Unknown') AS country_code
       FROM submissions s
       LEFT JOIN users u ON u.id = s.account_id
-      WHERE ${indiaGeoPredicate('s')}
     `);
 
-    // 2. Aggregate metrics by Indian State
-    const stateMap: Record<
+    const countryMap: Record<
       string,
       {
-        state: string;
+        country: string;
         active_scouts: Set<string>;
         total_submissions: number;
         total_beats: number;
@@ -35,10 +32,11 @@ export async function GET() {
     > = {};
 
     for (const sub of submissions) {
-      const state = resolveIndianState(parseFloat(sub.latitude), parseFloat(sub.longitude));
-      if (!stateMap[state]) {
-        stateMap[state] = {
-          state,
+      const country = sub.country_code;
+      
+      if (!countryMap[country]) {
+        countryMap[country] = {
+          country,
           active_scouts: new Set(),
           total_submissions: 0,
           total_beats: 0,
@@ -47,40 +45,40 @@ export async function GET() {
         };
       }
 
-      stateMap[state].active_scouts.add(sub.account_id);
-      stateMap[state].total_submissions += 1;
-      stateMap[state].total_beats += sub.beats_earned || 0;
+      countryMap[country].active_scouts.add(sub.account_id);
+      countryMap[country].total_submissions += 1;
+      countryMap[country].total_beats += sub.beats_earned || 0;
 
       const dType = sub.detection_type || 'unknown';
-      stateMap[state].detection_types[dType] = (stateMap[state].detection_types[dType] || 0) + 1;
+      countryMap[country].detection_types[dType] = (countryMap[country].detection_types[dType] || 0) + 1;
 
       if (sub.verification_status === 'verified') {
-        stateMap[state].verified_count += 1;
+        countryMap[country].verified_count += 1;
       }
     }
 
-    const stateAnalytics = Object.values(stateMap)
-      .map((st) => ({
-        state: st.state,
-        total_scouts: st.active_scouts.size,
-        total_submissions: st.total_submissions,
-        total_beats: parseFloat(st.total_beats.toFixed(2)),
+    const countryAnalytics = Object.values(countryMap)
+      .map((c) => ({
+        country: c.country,
+        total_scouts: c.active_scouts.size,
+        total_submissions: c.total_submissions,
+        total_beats: parseFloat(c.total_beats.toFixed(2)),
         verified_rate:
-          st.total_submissions > 0
-            ? parseFloat(((st.verified_count / st.total_submissions) * 100).toFixed(1))
+          c.total_submissions > 0
+            ? parseFloat(((c.verified_count / c.total_submissions) * 100).toFixed(1))
             : 0,
-        detection_types: st.detection_types,
+        detection_types: c.detection_types,
       }))
       .sort((a, b) => b.total_submissions - a.total_submissions);
 
     return NextResponse.json({
-      country: REGION_COUNTRY_CODE,
-      total_india_submissions: submissions.length,
-      states_data: stateAnalytics,
+      scope: 'global',
+      total_submissions: submissions.length,
+      countries_data: countryAnalytics,
     });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : 'Server error';
-    console.error('Failed to aggregate India scout analytics:', error);
+    console.error('Failed to aggregate global scout analytics:', error);
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

@@ -1,6 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { pool, resolveIndianState, parseJSONMetadata, extractVideoAsset } from '@/lib/db';
+import { pool } from '@/lib/db';
 import { indiaGeoPredicate } from '@/lib/region';
+import {
+  mapSubmissionRow,
+  SUBMISSION_SELECT,
+  SUBMISSION_IMAGE_COLUMNS,
+  SUBMISSION_IMAGE_ORDER,
+} from '@/lib/submissions';
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 100;
@@ -11,27 +17,26 @@ function toPositiveInt(raw: string | null, fallback: number, max?: number) {
   return typeof max === 'number' ? Math.min(parsed, max) : parsed;
 }
 
-function toNumber(value: unknown): number | null {
-  if (value === null || value === undefined) return null;
-  const n = Number(value);
-  return Number.isFinite(n) ? n : null;
-}
-
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const limit = Math.max(1, toPositiveInt(searchParams.get('limit'), DEFAULT_LIMIT, MAX_LIMIT));
   const offset = toPositiveInt(searchParams.get('offset'), 0);
   const detectionType = searchParams.get('detection_type');
   const status = searchParams.get('verification_status');
+  const reviewStatus = searchParams.get('review_status');
   const mediaType = searchParams.get('media_type');
   const username = searchParams.get('username');
   const dateFrom = searchParams.get('date_from');
   const dateTo = searchParams.get('date_to');
-  const stateFilter = searchParams.get('state');
+  // Counting the filtered set scans millions of rows. A caller that already
+  // knows the total (the review page, stepping between windows) opts out.
+  const skipCount = searchParams.get('count') === 'skip';
 
   try {
-    // India means where the detection was captured, not where the scout registered.
     const params: (string | number)[] = [];
+    // India means where the detection was CAPTURED. The scout account's
+    // registered country disagrees with the coordinates too often to use, and
+    // submissions.country_code is unpopulated.
     let where = `WHERE ${indiaGeoPredicate('s')}`;
 
     if (detectionType) {
@@ -46,6 +51,15 @@ export async function GET(request: NextRequest) {
       params.push(`%${username}%`);
       where += ` AND u.username ILIKE $${params.length}`;
     }
+    if (reviewStatus) {
+      // The officer's per-image verdict, filed against the primary frame.
+      params.push(reviewStatus);
+      where += ` AND EXISTS (
+                   SELECT 1 FROM submission_image_reviews r
+                   WHERE r.submission_id = s.id
+                     AND r.review_status = $${params.length}
+                 )`;
+    }
     if (mediaType === 'image') {
       where += ` AND EXISTS (SELECT 1 FROM submission_images si WHERE si.submission_id = s.id)`;
     } else if (mediaType === 'video') {
@@ -56,7 +70,11 @@ export async function GET(request: NextRequest) {
                  )`;
     }
 
-    const capturedAt = `COALESCE(s.captured_at, s.created_at)`;
+    // Plain captured_at, not COALESCE(captured_at, created_at): the COALESCE is
+    // not indexable, so it forced a full sort of ~2.3M rows and cost ~9s per
+    // page. captured_at is NOT NULL on all 2,727,304 rows, so the results are
+    // identical and idx_submissions_captured_at now serves the ordering in ~17ms.
+    const capturedAt = `s.captured_at`;
     if (dateFrom) {
       params.push(dateFrom.slice(0, 10));
       where += ` AND ${capturedAt} >= $${params.length}::date`;
@@ -67,7 +85,7 @@ export async function GET(request: NextRequest) {
     }
 
     const pageQuery = `
-      SELECT s.*, u.username, u.country_code
+      SELECT ${SUBMISSION_SELECT}
       FROM submissions s
       LEFT JOIN users u ON u.id = s.account_id
       ${where}
@@ -84,20 +102,19 @@ export async function GET(request: NextRequest) {
 
     const [pageResult, countResult] = await Promise.all([
       pool.query(pageQuery, [...params, limit, offset]),
-      pool.query(countQuery, params),
+      skipCount ? Promise.resolve(null) : pool.query(countQuery, params),
     ]);
 
     const rows = pageResult.rows;
-    const total: number = countResult.rows[0]?.total ?? 0;
+    const total: number | null = skipCount ? null : (countResult?.rows[0]?.total ?? 0);
 
-    // One batched lookup for every image on the page, primary frame first.
-    const imagesBySubmission: Record<string, unknown[]> = {};
+    const imagesBySubmission: Record<string, Record<string, unknown>[]> = {};
     if (rows.length > 0) {
       const { rows: imageRows } = await pool.query(
-        `SELECT id, submission_id, frame_index, is_primary, image_url, detection_data
+        `SELECT ${SUBMISSION_IMAGE_COLUMNS}
          FROM submission_images
          WHERE submission_id = ANY($1)
-         ORDER BY submission_id, is_primary DESC, frame_index ASC`,
+         ORDER BY submission_id, ${SUBMISSION_IMAGE_ORDER}`,
         [rows.map((r) => r.id)]
       );
       for (const img of imageRows) {
@@ -105,41 +122,31 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    const submissions = rows.map((row) => {
-      const processingMetadata = parseJSONMetadata(row.processing_metadata);
-      const videoAsset = extractVideoAsset(processingMetadata);
-      const images = imagesBySubmission[row.id] ?? [];
-      const latitude = toNumber(row.latitude);
-      const longitude = toNumber(row.longitude);
+    // Officer verdicts for this page, filed per primary frame.
+    const reviewBySubmission: Record<string, string> = {};
+    if (rows.length > 0) {
+      const { rows: reviewRows } = await pool.query(
+        `SELECT submission_id, review_status
+         FROM submission_image_reviews
+         WHERE submission_id = ANY($1)`,
+        [rows.map((r) => r.id)]
+      );
+      for (const review of reviewRows) {
+        reviewBySubmission[review.submission_id] = review.review_status;
+      }
+    }
 
-      return {
-        ...row,
-        latitude,
-        longitude,
-        end_latitude: toNumber(row.end_latitude),
-        end_longitude: toNumber(row.end_longitude),
-        beats_earned: toNumber(row.beats_earned) ?? 0,
-        processing_metadata: processingMetadata,
-        video_asset: videoAsset,
-        has_video: Boolean(videoAsset),
-        has_images: images.length > 0,
-        images,
-        state: resolveIndianState(latitude ?? NaN, longitude ?? NaN),
-      };
-    });
-
-    // State is derived in JS, so this filter only narrows the current page.
-    const filtered = stateFilter
-      ? submissions.filter((s) => s.state.toLowerCase() === stateFilter.toLowerCase())
-      : submissions;
+    const submissions = rows.map((row) =>
+      mapSubmissionRow(row, imagesBySubmission[row.id] ?? [], reviewBySubmission[row.id] ?? null)
+    );
 
     return NextResponse.json({
-      submissions: filtered,
+      submissions,
       total,
-      count: filtered.length,
+      count: submissions.length,
       limit,
       offset,
-      has_more: offset + rows.length < total,
+      has_more: total === null ? rows.length === limit : offset + rows.length < total,
     });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : 'Server error';

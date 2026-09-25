@@ -2,9 +2,15 @@ import { NextResponse } from 'next/server';
 import { pool } from '@/lib/db';
 import { indiaGeoPredicate } from '@/lib/region';
 
+/**
+ * Every detection class present in the data, with its counts.
+ *
+ * Scoped to India-captured detections, matching the evidence grid and the stat
+ * cards: a class filter counting a different population from the list it
+ * filters would not agree with it.
+ */
 export async function GET() {
     try {
-        // Region comes from the owning scout account: submissions.country_code is unpopulated.
         const { rows } = await pool.query(`
             SELECT
                 s.detection_type,

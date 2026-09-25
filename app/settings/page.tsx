@@ -43,20 +43,6 @@ export default function SettingsPage() {
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
                 {/* Main Settings Area */}
                 <div className="lg:col-span-2 space-y-6">
-                    <section className="bg-card rounded-3xl border border-border-subtle p-8 shadow-sm">
-                        <h3 className="text-xl font-black text-brand-blue tracking-tight flex items-center gap-2 mb-8">
-                            <Palette className="w-5 h-5 text-brand-green" />
-                            Appearance
-                        </h3>
-
-                        <div className="flex items-center justify-between p-6 bg-background rounded-2xl border border-border-subtle hover:border-brand-green/30 transition-all">
-                            <div className="space-y-1">
-                                <p className="text-sm font-bold text-brand-blue">Interface Theme</p>
-                                <p className="text-xs text-brand-gray">Switch between light and dark mode for your dashboard.</p>
-                            </div>
-                            <ThemeToggle />
-                        </div>
-                    </section>
 
                     <section className="bg-card rounded-3xl border border-border-subtle p-8 shadow-sm">
                         <h3 className="text-xl font-black text-brand-blue tracking-tight flex items-center gap-2 mb-8">

@@ -39,6 +39,10 @@ export interface Submission {
     country_code: string | null;
     primary_image_id: string | null;
     processing_metadata: Record<string, unknown> | null;
+    /** 'COURT_READY' | 'VALIDATED', or null when the case was never validated. */
+    review_status?: string | null;
+    /** Convenience view of review_status; null when never reviewed. */
+    court_ready?: boolean | null;
     created_at: string;
     video_asset: VideoAsset | null;
     has_video: boolean;

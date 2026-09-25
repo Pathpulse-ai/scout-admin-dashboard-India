@@ -23,11 +23,12 @@ interface CountryStat {
     activityPercent: number;
 }
 
+// Updated interface to match the global API response
 interface ScoutAnalyticsData {
-    country: string;
-    total_india_submissions: number;
-    states_data: {
-        state: string;
+    scope: string;
+    total_submissions: number;
+    countries_data: {
+        country: string;
         total_scouts: number;
         total_submissions: number;
         total_beats: number;
@@ -44,13 +45,6 @@ interface StatsData {
     total_frames: number;
 }
 
-/**
- * Share of the national total for each state, as whole tenths of a percent.
- *
- * Rounding each share independently lets the column land on 99.9 or 100.1, so
- * the remainder is apportioned by the largest-remainder method: the column
- * always sums to exactly 100.0%.
- */
 function toSharesOfTotal(values: number[]): number[] {
     const total = values.reduce((acc, v) => acc + v, 0);
     if (total <= 0) return values.map(() => 0);
@@ -75,24 +69,24 @@ export default function AnalyticsPage() {
     const [isRefreshing, setIsRefreshing] = useState(false);
     const [isLoading, setIsLoading] = useState(true);
 
-    // Live data
+    // Live data fallbacks
     const [totalHours, setTotalHours] = useState("87,296");
     const [totalKm, setTotalKm] = useState("1,208,628");
     const [globalUserbase, setGlobalUserbase] = useState("83,572");
-    const [activeCountries, setActiveCountries] = useState("32");
+    const [activeCountriesFallback, setActiveCountriesFallback] = useState("32");
 
-    // India-specific analytics
-    const [indiaSubmissions, setIndiaSubmissions] = useState(0);
-    const [indiaStates, setIndiaStates] = useState<ScoutAnalyticsData["states_data"]>([]);
+    // Global analytics states
+    const [globalSubmissions, setGlobalSubmissions] = useState(0);
+    const [countriesData, setCountriesData] = useState<ScoutAnalyticsData["countries_data"]>([]);
 
     const fetchAnalytics = useCallback(async () => {
         try {
-            // Fetch scout analytics (India-scoped)
+            // Fetch scout analytics (Global-scoped)
             const analyticsRes = await fetch("/api/analytics/scout");
             if (analyticsRes.ok) {
                 const analyticsData = await analyticsRes.json() as ScoutAnalyticsData;
-                setIndiaSubmissions(analyticsData.total_india_submissions);
-                setIndiaStates(analyticsData.states_data);
+                setGlobalSubmissions(analyticsData.total_submissions);
+                setCountriesData(analyticsData.countries_data);
             }
 
             // Fetch global stats
@@ -102,7 +96,7 @@ export default function AnalyticsPage() {
                 setTotalHours(statsData.total_frames.toLocaleString());
                 setTotalKm(statsData.total_submissions.toLocaleString());
                 setGlobalUserbase(statsData.verified.toLocaleString());
-                setActiveCountries(statsData.pending.toLocaleString());
+                setActiveCountriesFallback(statsData.pending.toLocaleString());
             }
         } catch (err) {
             console.warn("Failed to fetch analytics, using defaults:", err);
@@ -122,19 +116,19 @@ export default function AnalyticsPage() {
         });
     };
 
-    // Each state's share of all India submissions, so the column totals 100%.
+    // Each country's share of all global submissions
     const displayData: CountryStat[] = (() => {
-        const shares = toSharesOfTotal(indiaStates.map((st) => st.total_submissions));
-        return indiaStates.map((st, idx) => ({
+        const shares = toSharesOfTotal(countriesData.map((c) => c.total_submissions));
+        return countriesData.map((c, idx) => ({
             rank: idx + 1,
-            code: st.state,
-            submissions: st.total_submissions,
+            code: c.country,
+            submissions: c.total_submissions,
             activityPercent: shares[idx],
         }));
     })();
 
-    const tableTitle = indiaStates.length > 0 ? "India State-wise Reach" : "Geographic Reach";
-    const tableSubtitle = indiaStates.length > 0 ? "SUBMISSIONS BY INDIAN STATE" : "SUBMISSIONS BY COUNTRY";
+    const tableTitle = "Global Geographic Reach";
+    const tableSubtitle = "SUBMISSIONS BY COUNTRY";
 
     return (
         <div className="space-y-6 max-w-7xl mx-auto animate-in fade-in duration-500 pb-12 font-sans">
@@ -157,15 +151,15 @@ export default function AnalyticsPage() {
             {isLoading ? (
                 <div className="py-24 flex flex-col items-center justify-center gap-4 bg-card rounded-2xl border border-border-subtle">
                     <Loader2 className="w-8 h-8 text-brand-blue animate-spin" />
-                    <p className="text-xs text-muted-foreground font-bold uppercase tracking-widest">Aggregating India intelligence data...</p>
+                    <p className="text-xs text-muted-foreground font-bold uppercase tracking-widest">Aggregating global intelligence data...</p>
                 </div>
             ) : (
                 <>
                     {/* High-Level Metrics Top 4 Cards */}
                     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
                         <StatCard
-                            title="INDIA SUBMISSIONS"
-                            value={indiaSubmissions > 0 ? indiaSubmissions.toLocaleString() : totalHours}
+                            title="GLOBAL SUBMISSIONS"
+                            value={globalSubmissions > 0 ? globalSubmissions.toLocaleString() : totalHours}
                             icon={Clock}
                             variant="info"
                         />
@@ -182,8 +176,8 @@ export default function AnalyticsPage() {
                             variant="default"
                         />
                         <StatCard
-                            title="ACTIVE STATES"
-                            value={indiaStates.length > 0 ? String(indiaStates.length) : activeCountries}
+                            title="ACTIVE COUNTRIES"
+                            value={countriesData.length > 0 ? String(countriesData.length) : activeCountriesFallback}
                             icon={Globe}
                             variant="warning"
                         />
@@ -210,7 +204,7 @@ export default function AnalyticsPage() {
                                 </div>
 
                                 <div className="px-3 py-1 bg-brand-blue/10 border border-brand-blue/25 rounded-full text-[10px] font-bold text-brand-blue uppercase tracking-widest">
-                                    {indiaStates.length > 0 ? "LIVE DATA" : "CACHED DATA"}
+                                    {countriesData.length > 0 ? "LIVE DATA" : "CACHED DATA"}
                                 </div>
                             </div>
 
@@ -223,7 +217,7 @@ export default function AnalyticsPage() {
                                                 RANK
                                             </th>
                                             <th className="px-6 py-3.5 text-[10px] font-bold text-muted-foreground uppercase tracking-widest">
-                                                {indiaStates.length > 0 ? "STATE" : "CODE"}
+                                                COUNTRY CODE
                                             </th>
                                             <th className="px-6 py-3.5 text-[10px] font-bold text-muted-foreground uppercase tracking-widest text-center">
                                                 SUBMISSIONS
@@ -247,7 +241,7 @@ export default function AnalyticsPage() {
                                                 <td className="px-6 py-4">
                                                     <div className={cn(
                                                         "rounded-xl bg-muted-background border border-border-subtle flex items-center justify-center text-xs font-bold text-foreground group-hover:border-brand-blue/40 group-hover:text-brand-blue transition-all",
-                                                        indiaStates.length > 0 ? "px-3 py-1.5 w-auto inline-flex" : "w-12 h-8"
+                                                        countriesData.length > 0 ? "px-3 py-1.5 w-auto inline-flex" : "w-12 h-8"
                                                     )}>
                                                         {item.code}
                                                     </div>
@@ -285,12 +279,12 @@ export default function AnalyticsPage() {
                                     <TrendingUp className="w-5 h-5" />
                                 </div>
                                 <h4 className="text-lg font-bold text-foreground tracking-tight mb-2">
-                                    India Network Expansion
+                                    Global Network Expansion
                                 </h4>
                                 <p className="text-xs text-muted-foreground font-medium leading-relaxed mb-5">
-                                    The PathPulse India network has coverage across{" "}
-                                    <strong className="text-foreground font-bold">{indiaStates.length > 0 ? indiaStates.length : 32}</strong> {indiaStates.length > 0 ? "states & territories" : "regions"}, processing{" "}
-                                    <strong className="text-foreground font-bold">{indiaSubmissions > 0 ? indiaSubmissions.toLocaleString() : "76,385"}</strong> detection submissions.
+                                    The PathPulse global network has coverage across{" "}
+                                    <strong className="text-foreground font-bold">{countriesData.length > 0 ? countriesData.length : 32}</strong> countries, processing{" "}
+                                    <strong className="text-foreground font-bold">{globalSubmissions > 0 ? globalSubmissions.toLocaleString() : "76,385"}</strong> detection submissions.
                                 </p>
                                 <div className="flex items-center gap-1.5 text-brand-blue text-[10px] font-bold uppercase tracking-widest group-hover:translate-x-1 transition-transform cursor-pointer">
                                     <span>VIEW COVERAGE DETAILS</span>
@@ -312,8 +306,8 @@ export default function AnalyticsPage() {
                                                 AVG. SUBMISSIONS / SCOUT
                                             </p>
                                             <p className="text-xl font-bold text-foreground tracking-tight font-mono">
-                                                {indiaStates.length > 0
-                                                    ? Math.round(indiaSubmissions / Math.max(1, indiaStates.reduce((acc, s) => acc + s.total_scouts, 0)))
+                                                {countriesData.length > 0
+                                                    ? Math.round(globalSubmissions / Math.max(1, countriesData.reduce((acc, c) => acc + c.total_scouts, 0)))
                                                     : 14} <span className="text-xs font-normal text-muted-foreground font-sans">subs</span>
                                             </p>
                                         </div>
@@ -329,8 +323,8 @@ export default function AnalyticsPage() {
                                                 TOTAL BEATS EARNED
                                             </p>
                                             <p className="text-xl font-bold text-foreground tracking-tight font-mono">
-                                                {indiaStates.length > 0
-                                                    ? indiaStates.reduce((acc, s) => acc + s.total_beats, 0).toFixed(1)
+                                                {countriesData.length > 0
+                                                    ? countriesData.reduce((acc, c) => acc + c.total_beats, 0).toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 })
                                                     : "37,769.6"} <span className="text-xs font-normal text-muted-foreground font-sans">PTS</span>
                                             </p>
                                         </div>

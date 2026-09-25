@@ -18,7 +18,7 @@ const navigationItems = [
         id: "analytics",
         label: "Dashboard",
         icon: LayoutDashboard,
-        href: "/analytics",
+        href: "/dashboard",
     },
     {
         id: "detections",
@@ -83,12 +83,12 @@ const Sidebar = ({ isOpen, setIsOpen, isCollapsed, setIsCollapsed }: SidebarProp
                     )}
                 >
                     {isCollapsed ? (
-                        <Link href="/analytics" aria-label="PathPulse.ai Admin Console">
+                        <Link href="/dashboard" aria-label="PathPulse.ai Admin Console">
                             <BrandMark className="w-9 h-9" />
                         </Link>
                     ) : (
                         <div className="flex items-center justify-between w-full gap-3">
-                            <Link href="/analytics" className="flex items-center gap-3 min-w-0">
+                            <Link href="/dashboard" className="flex items-center gap-3 min-w-0">
                                 <BrandMark className="w-9 h-9" />
                                 <span className="flex flex-col min-w-0 leading-none">
                                     <span className="text-[15px] font-bold text-white tracking-tight truncate">
@@ -121,7 +121,7 @@ const Sidebar = ({ isOpen, setIsOpen, isCollapsed, setIsCollapsed }: SidebarProp
                         const Icon = item.icon;
                         const isActive =
                             pathname === item.href ||
-                            (item.id === "analytics" && (pathname === "/analytics" || pathname === "/dashboard"));
+                            (item.id === "analytics" && (pathname === "/dashboard" || pathname === "/dashboard"));
 
                         return (
                             <Link
