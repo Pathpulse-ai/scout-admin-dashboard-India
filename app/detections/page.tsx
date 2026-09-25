@@ -12,8 +12,6 @@ import {
     Calendar,
     ChevronDown,
     Loader2,
-    ChevronLeft,
-    ChevronRight,
     MapPin,
     User,
     Check,
@@ -28,23 +26,25 @@ import { cn } from "@/lib/utils";
 import CourtReadyDialog from "@/components/detections/CourtReadyDialog";
 import {
     DetectionFilters,
-    GRID_PAGE_SIZE,
     ReviewRange,
     ReviewTab,
     parseFilters,
+    GRID_BATCH_SIZE,
     REVIEW_COURT_READY,
+    batchIndexFor,
     parsePage,
     resolveDateFrom,
     toReviewParams,
 } from "@/lib/detectionFilters";
 
 const filterTabs = [
-    { id: "all", label: "All cases" },
     { id: "pending", label: "Pending review" },
     { id: "verified", label: "Validated" },
     // A subset of Validated, not a separate status: these cases show in both.
     { id: "court_ready", label: "Court ready" },
     { id: "rejected", label: "Dismissed" },
+    // Not a status filter: a progress view across every class.
+    { id: "by_class", label: "By class", isView: true },
 ];
 
 // Friendly names for the classes whose raw value reads poorly; everything else
@@ -95,11 +95,29 @@ export default function DetectionsPage() {
 
     // Filter states
     const [searchQuery, setSearchQuery] = useState("");
-    const [activeTab, setActiveTab] = useState("all");
+    const [activeTab, setActiveTab] = useState("pending");
     const [violationType, setViolationType] = useState("");
     const [timeRange, setTimeRange] = useState("all");
-    const [page, setPage] = useState(0);
-    const limit = GRID_PAGE_SIZE;   // module constant; stable across renders
+    /**
+     * How many batches of the queue are on screen.
+     *
+     * The grid is a continuous list rather than pages: a reviewer asked to see
+     * all pending work, and 40,000 pending cases at 9 per page is 4,454 pages.
+     * Scrolling to the bottom appends the next batch.
+     */
+    const [batchCount, setBatchCount] = useState(1);
+
+    /** `by_class` renders a progress table instead of the evidence grid. */
+    const isClassView = activeTab === "by_class";
+
+    /**
+     * Large classes are split into fixed 5,000-image packets. '' is the whole
+     * class; 'A', 'B', ... select one packet.
+     */
+    const [selectedBatch, setSelectedBatch] = useState("");
+    const [classBatches, setClassBatches] = useState<
+        { label: string; start_rank: number; size: number }[]
+    >([]);
 
     // Filters arrive in the URL when the reviewer comes back from a case, so
     // Back lands on the same slice they left. Read from window.location rather
@@ -112,7 +130,9 @@ export default function DetectionsPage() {
         setViolationType(restored.type);
         setTimeRange(restored.range);
         setSearchQuery(restored.q);
-        setPage(parsePage(search));
+        setSelectedBatch(restored.batch);
+        // Coming back from a case: load enough batches to include where they were.
+        setBatchCount(batchIndexFor(parsePage(search)) + 1);
         setIsHydrated(true);
     }, []);
 
@@ -129,6 +149,41 @@ export default function DetectionsPage() {
         }
     }, []);
 
+    // Which fixed packets this class is split into. Empty for small classes.
+    useEffect(() => {
+        // Before hydration violationType is still empty, and clearing here
+        // would wipe a batch restored from the URL.
+        if (!isHydrated) return;
+        if (!violationType) {
+            setClassBatches([]);
+            setSelectedBatch("");
+            return;
+        }
+        let cancelled = false;
+        (async () => {
+            try {
+                const res = await fetch(
+                    `/api/detection-batches?detection_type=${encodeURIComponent(violationType)}`
+                );
+                if (!res.ok) throw new Error("batch lookup failed");
+                const data = (await res.json()) as {
+                    batches: { label: string; start_rank: number; size: number }[];
+                };
+                if (cancelled) return;
+                setClassBatches(data.batches ?? []);
+                // Drop a selection that does not exist in the new class.
+                setSelectedBatch((current) =>
+                    current && (data.batches ?? []).some((b) => b.label === current) ? current : ""
+                );
+            } catch {
+                if (!cancelled) setClassBatches([]);
+            }
+        })();
+        return () => {
+            cancelled = true;
+        };
+    }, [violationType, isHydrated]);
+
     // Every detection class present in the data, newest schema included.
     const fetchDetectionTypes = useCallback(async () => {
         try {
@@ -141,18 +196,45 @@ export default function DetectionsPage() {
         }
     }, []);
 
-    // Fetch submissions
-    const fetchSubmissions = useCallback(async () => {
-        setIsLoading(true);
-        try {
+    /**
+     * Batched loading.
+     *
+     * One request brings back GRID_BATCH_PAGES worth of rows and the batch is
+     * kept in memory, so moving between pages inside it costs nothing. Batches
+     * are keyed by the filter set, and the whole cache is dropped when the
+     * filters change because the sequence itself changes.
+     */
+    const batchCacheRef = useRef<Map<string, Submission[]>>(new Map());
+    const totalCacheRef = useRef<Map<string, number>>(new Map());
+    const inflightRef = useRef<Map<string, Promise<void>>>(new Map());
+
+    const filterKey = [
+        activeTab,
+        violationType,
+        timeRange,
+        searchQuery.trim(),
+        selectedBatch,
+    ].join("|");
+
+    // A filter change invalidates every cached batch: different rows, different order.
+    useEffect(() => {
+        batchCacheRef.current.clear();
+        totalCacheRef.current.clear();
+        inflightRef.current.clear();
+    }, [filterKey]);
+
+    const buildParams = useCallback(
+        (batchIndex: number, withCount: boolean) => {
             const params = new URLSearchParams();
-            params.set("limit", String(limit));
-            params.set("offset", String(page * limit));
+            params.set("limit", String(GRID_BATCH_SIZE));
+            params.set("offset", String(batchIndex * GRID_BATCH_SIZE));
             if (violationType) params.set("detection_type", violationType);
+            if (violationType && selectedBatch) params.set("batch", selectedBatch);
             if (activeTab === "court_ready") {
+                // Court ready is a subset of verified, not a status of its own.
                 params.set("verification_status", "verified");
                 params.set("review_status", REVIEW_COURT_READY);
-            } else if (activeTab !== "all") {
+            } else if (activeTab !== "all" && activeTab !== "by_class") {
                 params.set("verification_status", activeTab);
             }
             if (searchQuery.trim()) params.set("username", searchQuery.trim());
@@ -163,19 +245,91 @@ export default function DetectionsPage() {
                 from.setDate(from.getDate() - days);
                 params.set("date_from", from.toISOString().slice(0, 10));
             }
+            // The total is the same for every batch of one filter, so it is
+            // requested once and reused from the cache after that.
+            if (!withCount) params.set("count", "skip");
+            return params;
+        },
+        [activeTab, violationType, selectedBatch, searchQuery, timeRange]
+    );
 
-            const res = await fetch(`/api/submissions?${params.toString()}`);
-            if (!res.ok) throw new Error("API call failed");
-            const data = await res.json() as { submissions: Submission[]; total: number };
-            setSubmissions(data.submissions ?? []);
-            setTotal(data.total ?? 0);
+    const loadBatch = useCallback(
+        (batchIndex: number): Promise<void> => {
+            const key = `${filterKey}#${batchIndex}`;
+            if (batchCacheRef.current.has(key)) return Promise.resolve();
+
+            const existing = inflightRef.current.get(key);
+            if (existing) return existing;
+
+            const needCount = !totalCacheRef.current.has(filterKey);
+            const request = (async () => {
+                const res = await fetch(`/api/submissions?${buildParams(batchIndex, needCount).toString()}`);
+                if (!res.ok) throw new Error(`Request failed with status ${res.status}`);
+                const data = (await res.json()) as {
+                    submissions: Submission[];
+                    total: number | null;
+                };
+                batchCacheRef.current.set(key, data.submissions ?? []);
+                if (data.total !== null && data.total !== undefined) {
+                    totalCacheRef.current.set(filterKey, data.total);
+                }
+            })().finally(() => {
+                inflightRef.current.delete(key);
+            });
+
+            inflightRef.current.set(key, request);
+            return request;
+        },
+        [filterKey, buildParams]
+    );
+
+    const fetchSubmissions = useCallback(async () => {
+        const wanted = Array.from({ length: batchCount }, (_, i) => i);
+        const allCached = wanted.every((i) => batchCacheRef.current.has(`${filterKey}#${i}`));
+
+        // Only show the skeleton for a real fetch; cached rows should be instant.
+        if (!allCached) setIsLoading(true);
+
+        try {
+            await Promise.all(wanted.map((i) => loadBatch(i)));
+            const rows = wanted.flatMap((i) => batchCacheRef.current.get(`${filterKey}#${i}`) ?? []);
+            setSubmissions(rows);
+            setTotal(totalCacheRef.current.get(filterKey) ?? 0);
         } catch {
             setSubmissions([]);
-            setTotal(0);
+            setTotal(totalCacheRef.current.get(filterKey) ?? 0);
         } finally {
             setIsLoading(false);
         }
-    }, [page, limit, violationType, activeTab, searchQuery, timeRange]);
+    }, [batchCount, filterKey, loadBatch]);
+
+    const loadedCount = submissions.length;
+    const hasMore = total > 0 && loadedCount < total;
+
+    /** Appending happens when the sentinel below the last card scrolls into view. */
+    const sentinelRef = useRef<HTMLDivElement | null>(null);
+    useEffect(() => {
+        if (!isHydrated || isLoading || !hasMore || activeTab === "by_class") return;
+        const node = sentinelRef.current;
+        if (!node) return;
+
+        const observer = new IntersectionObserver(
+            (entries) => {
+                if (entries.some((e) => e.isIntersecting)) {
+                    setBatchCount((n) => n + 1);
+                }
+            },
+            // Start fetching before the sentinel is actually visible.
+            { rootMargin: "600px" }
+        );
+        observer.observe(node);
+        return () => observer.disconnect();
+    }, [isHydrated, isLoading, hasMore, loadedCount, activeTab]);
+
+    // A filter change collapses the list back to a single batch.
+    useEffect(() => {
+        setBatchCount(1);
+    }, [filterKey]);
 
     useEffect(() => {
         fetchStats();
@@ -186,9 +340,22 @@ export default function DetectionsPage() {
         // Wait for the URL-restored filters, or the first render would fetch
         // the unfiltered page and then immediately refetch.
         if (!isHydrated) return;
+        if (activeTab === "by_class") return;
+
+        // The debounce exists to keep typing in the search box from firing a
+        // request per keystroke. A page already held in the batch cache needs
+        // no request at all, so it should not pay that delay.
+        const allCached = Array.from({ length: batchCount }, (_, i) => i).every((i) =>
+            batchCacheRef.current.has(`${filterKey}#${i}`)
+        );
+        if (allCached) {
+            void fetchSubmissions();
+            return;
+        }
+
         const timer = setTimeout(fetchSubmissions, 350);
         return () => clearTimeout(timer);
-    }, [fetchSubmissions, isHydrated]);
+    }, [fetchSubmissions, isHydrated, filterKey, batchCount, activeTab]);
 
     // Handle Actions
     //
@@ -290,6 +457,28 @@ export default function DetectionsPage() {
     };
     const handleDismiss = (sub: Submission, e?: React.MouseEvent) => applyDecision(sub, "rejected", e);
 
+    /** The count a class contributes to whichever tab is open. */
+    const countForTab = (type: DetectionTypeCount) => {
+        if (activeTab === "verified") return type.verified ?? 0;
+        if (activeTab === "rejected") return type.rejected ?? 0;
+        if (activeTab === "court_ready") return type.court_ready ?? 0;
+        if (activeTab === "pending") return type.pending;
+        return type.total;
+    };
+
+    // Most work left first: that is the question the table answers.
+    const classRows = [...detectionTypes].sort((a, b) => b.pending - a.pending);
+    const classTotals = classRows.reduce(
+        (acc, c) => ({
+            total: acc.total + c.total,
+            pending: acc.pending + c.pending,
+            verified: acc.verified + (c.verified ?? 0),
+            rejected: acc.rejected + (c.rejected ?? 0),
+            court: acc.court + (c.court_ready ?? 0),
+        }),
+        { total: 0, pending: 0, verified: 0, rejected: 0, court: 0 }
+    );
+
     // Filtering and paging are done server-side; render exactly what came back.
     const displaySubmissions = submissions;
 
@@ -301,6 +490,7 @@ export default function DetectionsPage() {
         range: timeRange as ReviewRange,
         from: resolveDateFrom(timeRange as ReviewRange),
         q: searchQuery.trim(),
+        batch: selectedBatch,
     };
 
     // Helpers for case ID & status badges matching image
@@ -436,7 +626,7 @@ export default function DetectionsPage() {
                                 key={tab.id}
                                 onClick={() => {
                                     setActiveTab(tab.id);
-                                    setPage(0);
+                                    setBatchCount(1);
                                 }}
                                 className={cn(
                                     "px-4 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer",
@@ -459,19 +649,46 @@ export default function DetectionsPage() {
                             value={violationType}
                             onChange={(e) => {
                                 setViolationType(e.target.value);
-                                setPage(0);
+                                setSelectedBatch("");
+                                setBatchCount(1);
                             }}
                             className="appearance-none bg-white border border-[#E2E8F0] rounded-xl px-4 py-2 pr-9 text-xs font-semibold text-[#0F172A] focus:outline-none focus:ring-2 focus:ring-[#00DF89]/30 cursor-pointer shadow-sm"
                         >
                             <option value="">All classes ({detectionTypes.length})</option>
                             {detectionTypes.map((type) => (
                                 <option key={type.detection_type} value={type.detection_type}>
-                                    {formatDetectionTypeLabel(type.detection_type)} ({type.total.toLocaleString()})
+                                    {formatDetectionTypeLabel(type.detection_type)} ({countForTab(type).toLocaleString()})
                                 </option>
                             ))}
                         </select>
                         <ChevronDown className="w-3.5 h-3.5 text-[#94A3B8] absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
                     </div>
+
+                    {/* Fixed 5,000-image packets; only shown for classes big
+                        enough to be split. */}
+                    {classBatches.length > 1 && (
+                        <div className="relative">
+                            <select
+                                value={selectedBatch}
+                                onChange={(e) => {
+                                    setSelectedBatch(e.target.value);
+                                    setBatchCount(1);
+                                }}
+                                className="appearance-none bg-white border border-[#E2E8F0] rounded-xl px-4 py-2 pr-9 text-xs font-semibold text-[#0F172A] focus:outline-none focus:ring-2 focus:ring-[#00DF89]/30 cursor-pointer shadow-sm"
+                            >
+                                <option value="">
+                                    Whole class ({classBatches.length} batches)
+                                </option>
+                                {classBatches.map((b) => (
+                                    <option key={b.label} value={b.label}>
+                                        Batch {b.label} &mdash; {b.start_rank.toLocaleString()}–
+                                        {(b.start_rank + b.size - 1).toLocaleString()} ({b.size.toLocaleString()})
+                                    </option>
+                                ))}
+                            </select>
+                            <ChevronDown className="w-3.5 h-3.5 text-[#94A3B8] absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                        </div>
+                    )}
 
                     {/* Time Dropdown with Calendar Icon */}
                     <div className="relative">
@@ -479,7 +696,7 @@ export default function DetectionsPage() {
                             <Calendar className="w-3.5 h-3.5 text-[#94A3B8]" />
                             <select
                                 value={timeRange}
-                                onChange={(e) => { setTimeRange(e.target.value); setPage(0); }}
+                                onChange={(e) => { setTimeRange(e.target.value); setBatchCount(1); }}
                                 className="appearance-none bg-transparent pr-5 text-xs font-semibold text-[#0F172A] focus:outline-none cursor-pointer"
                             >
                                 <option value="all">All time</option>
@@ -493,9 +710,133 @@ export default function DetectionsPage() {
                 </div>
             </div>
 
+            {isClassView ? (
+                <div className="bg-white rounded-[22px] border border-[#E2E8F0] shadow-sm overflow-hidden">
+                    <div className="px-5 py-4 border-b border-[#E2E8F0] flex flex-wrap items-baseline justify-between gap-2">
+                        <div>
+                            <h2 className="text-sm font-extrabold text-[#0F172A]">Review progress by class</h2>
+                            <p className="text-[11px] font-medium text-[#64748B] mt-0.5">
+                                Total is the all-time size of a class and does not fall as cases are
+                                reviewed. Remaining is what still needs an officer.
+                            </p>
+                        </div>
+                        <span className="text-[11px] font-bold text-[#64748B] font-mono">
+                            {classTotals.pending.toLocaleString()} of {classTotals.total.toLocaleString()} remaining
+                        </span>
+                    </div>
+
+                    <div className="overflow-x-auto">
+                        <table className="w-full text-left">
+                            <thead className="bg-[#F8FAFC] border-b border-[#E2E8F0]">
+                                <tr>
+                                    {["CLASS", "PROGRESS", "REMAINING", "VALIDATED", "COURT READY", "DISMISSED", "TOTAL"].map(
+                                        (h, i) => (
+                                            <th
+                                                key={h}
+                                                className={cn(
+                                                    "px-5 py-3 text-[10px] font-bold text-[#64748B] uppercase tracking-wider",
+                                                    i > 1 && "text-right"
+                                                )}
+                                            >
+                                                {h}
+                                            </th>
+                                        )
+                                    )}
+                                </tr>
+                            </thead>
+                            <tbody className="divide-y divide-[#F1F5F9]">
+                                {classRows.length === 0 ? (
+                                    <tr>
+                                        <td colSpan={7} className="py-16 text-center text-sm text-[#94A3B8]">
+                                            No detection classes to show.
+                                        </td>
+                                    </tr>
+                                ) : (
+                                    classRows.map((c) => {
+                                        const done = c.total - c.pending;
+                                        const pct = c.total > 0 ? Math.round((done / c.total) * 100) : 0;
+                                        const complete = c.pending === 0 && c.total > 0;
+
+                                        return (
+                                            <tr
+                                                key={c.detection_type}
+                                                onClick={() => {
+                                                    // Jump straight into the remaining work for this class.
+                                                    setViolationType(c.detection_type);
+                                                    setActiveTab(complete ? "verified" : "pending");
+                                                    setBatchCount(1);
+                                                }}
+                                                className="hover:bg-[#F8FAFC] transition-colors cursor-pointer"
+                                            >
+                                                <td className="px-5 py-4">
+                                                    <div className="flex items-center gap-2">
+                                                        <span className="text-xs font-bold text-[#0F172A]">
+                                                            {formatDetectionTypeLabel(c.detection_type)}
+                                                        </span>
+                                                        {complete && (
+                                                            <span className="bg-[#D1FAE5] text-[#065F46] border border-[#A7F3D0] text-[10px] font-bold px-2 py-0.5 rounded-full">
+                                                                Done
+                                                            </span>
+                                                        )}
+                                                    </div>
+                                                </td>
+                                                <td className="px-5 py-4">
+                                                    <div className="flex items-center gap-2 min-w-[140px]">
+                                                        <div className="flex-1 h-2 rounded-full bg-[#F1F5F9] overflow-hidden">
+                                                            <div
+                                                                className={cn(
+                                                                    "h-full rounded-full",
+                                                                    complete ? "bg-[#00DF89]" : "bg-[#2563EB]"
+                                                                )}
+                                                                style={{ width: `${pct}%` }}
+                                                            />
+                                                        </div>
+                                                        <span className="text-[11px] font-bold text-[#64748B] font-mono w-9 text-right">
+                                                            {pct}%
+                                                        </span>
+                                                    </div>
+                                                </td>
+                                                <td className="px-5 py-4 text-right text-xs font-bold text-[#0F172A] font-mono">
+                                                    {c.pending.toLocaleString()}
+                                                </td>
+                                                <td className="px-5 py-4 text-right text-xs font-bold text-[#059669] font-mono">
+                                                    {(c.verified ?? 0).toLocaleString()}
+                                                </td>
+                                                <td className="px-5 py-4 text-right text-xs font-bold text-[#1D4ED8] font-mono">
+                                                    {(c.court_ready ?? 0).toLocaleString()}
+                                                </td>
+                                                <td className="px-5 py-4 text-right text-xs font-bold text-[#94A3B8] font-mono">
+                                                    {(c.rejected ?? 0).toLocaleString()}
+                                                </td>
+                                                <td className="px-5 py-4 text-right text-xs font-semibold text-[#64748B] font-mono">
+                                                    {c.total.toLocaleString()}
+                                                </td>
+                                            </tr>
+                                        );
+                                    })
+                                )}
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <p className="px-5 py-3 border-t border-[#E2E8F0] text-[11px] font-medium text-[#64748B]">
+                        Click a class to open its remaining cases.
+                    </p>
+                </div>
+            ) : (
+            <>
             {/* Evidence Records Counter matching image */}
             <div className="flex items-center justify-between text-xs text-[#64748B] font-semibold px-1">
-                <span>Showing {displaySubmissions.length > 0 ? displaySubmissions.length : total} active evidence records</span>
+                <span>
+                    Showing {displaySubmissions.length.toLocaleString()} of{" "}
+                    {total.toLocaleString()} {activeTab === "pending" ? "pending" : "matching"} records
+                    {selectedBatch && (
+                        <span className="text-[#1D4ED8]">
+                            {" "}
+                            in {formatDetectionTypeLabel(violationType)} batch {selectedBatch}
+                        </span>
+                    )}
+                </span>
                 <span className="text-[#94A3B8]">Click any frame to review it full screen</span>
             </div>
 
@@ -522,7 +863,7 @@ export default function DetectionsPage() {
                         const imgUrl = primaryImg?.image_url;
                         const videoUrl = sub.video_asset?.url;
                         const caseId = formatCaseId(sub.id, idx);
-                        const reviewParams = toReviewParams(gridFilters, page * limit + idx, total);
+                        const reviewParams = toReviewParams(gridFilters, idx, total);
                         reviewParams.set("id", sub.id);
                         const reviewHref = `/detections/review?${reviewParams.toString()}`;
 
@@ -572,6 +913,8 @@ export default function DetectionsPage() {
                                         <img
                                             src={imgUrl}
                                             alt={sub.detection_type || "Violation evidence"}
+                                            loading="lazy"
+                                            decoding="async"
                                             className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
                                         />
                                     ) : (
@@ -650,6 +993,9 @@ export default function DetectionsPage() {
                 </div>
             )}
 
+            </>
+            )}
+
             <CourtReadyDialog
                 caseLabel={courtPromptFor ? courtPromptFor.id : null}
                 isSaving={savingId !== null && savingId === courtPromptFor?.id}
@@ -664,28 +1010,36 @@ export default function DetectionsPage() {
                 onCancel={() => setCourtPromptFor(null)}
             />
 
-            {/* Pagination Controls */}
-            {!isLoading && total > limit && (
-                <div className="flex items-center justify-center gap-2 pt-6">
-                    <button
-                        disabled={page === 0}
-                        onClick={() => setPage((p) => Math.max(0, p - 1))}
-                        className="p-2.5 rounded-xl bg-white border border-[#E2E8F0] text-[#0F172A] hover:border-[#00DF89] disabled:opacity-40 transition-all shadow-sm cursor-pointer"
-                    >
-                        <ChevronLeft className="w-4 h-4" />
-                    </button>
-                    <span className="px-4 py-2 text-xs font-bold text-[#0F172A] bg-white border border-[#E2E8F0] rounded-xl shadow-sm">
-                        Page {page + 1} of {Math.ceil(total / limit) || 1}
+            {/* Sentinel: scrolling near it appends the next batch */}
+            {!isLoading && hasMore && (
+                <div ref={sentinelRef} className="py-8 flex items-center justify-center gap-2">
+                    <Loader2 className="w-4 h-4 text-[#00DF89] animate-spin" />
+                    <span className="text-xs font-bold text-[#64748B] uppercase tracking-widest">
+                        Loading more evidence&hellip;
                     </span>
-                    <button
-                        disabled={(page + 1) * limit >= total}
-                        onClick={() => setPage((p) => p + 1)}
-                        className="p-2.5 rounded-xl bg-white border border-[#E2E8F0] text-[#0F172A] hover:border-[#00DF89] disabled:opacity-40 transition-all shadow-sm cursor-pointer"
-                    >
-                        <ChevronRight className="w-4 h-4" />
-                    </button>
                 </div>
             )}
+
+            {!isLoading && !hasMore && displaySubmissions.length > 0 && (
+                <p className="py-8 text-center text-xs font-semibold text-[#94A3B8]">
+                    End of queue &mdash; {total.toLocaleString()}{" "}
+                    {total === 1 ? "record" : "records"}
+                </p>
+            )}
+
+            <CourtReadyDialog
+                caseLabel={courtPromptFor ? courtPromptFor.id : null}
+                isSaving={savingId !== null && savingId === courtPromptFor?.id}
+                onAnswer={(courtReady) => {
+                    const sub = courtPromptFor;
+                    if (!sub) return;
+                    // Stay open through the save so the spinner is visible.
+                    void applyDecision(sub, "verified", undefined, courtReady).finally(() =>
+                        setCourtPromptFor(null)
+                    );
+                }}
+                onCancel={() => setCourtPromptFor(null)}
+            />
 
         </div>
     );

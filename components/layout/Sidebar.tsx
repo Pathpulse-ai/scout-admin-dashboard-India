@@ -15,22 +15,22 @@ import { cn } from "@/lib/utils";
 
 const navigationItems = [
     {
-        id: "analytics",
-        label: "Dashboard",
-        icon: LayoutDashboard,
-        href: "/dashboard",
+        id: "users",
+        label: "User Discovery",
+        icon: Users,
+        href: "/users",
     },
+    // {
+    //     id: "analytics",
+    //     label: "Dashboard",
+    //     icon: LayoutDashboard,
+    //     href: "/dashboard",
+    // },
     {
         id: "detections",
         label: "Detections",
         icon: Scan,
         href: "/detections",
-    },
-    {
-        id: "users",
-        label: "User Discovery",
-        icon: Users,
-        href: "/users",
     },
 ];
 

@@ -7,6 +7,17 @@
  */
 
 export const GRID_PAGE_SIZE = 9;
+export const GRID_BATCH_PAGES = 5;
+export const GRID_BATCH_SIZE = GRID_PAGE_SIZE * GRID_BATCH_PAGES;   // 45, under the API's limit of 100
+
+/** Which batch a given zero-based page lives in, and where inside it. */
+export function batchIndexFor(page: number): number {
+    return Math.floor(Math.max(0, page) / GRID_BATCH_PAGES);
+}
+
+export function offsetWithinBatch(page: number): number {
+    return (Math.max(0, page) % GRID_BATCH_PAGES) * GRID_PAGE_SIZE;
+}
 
 /**
  * Records fetched per review window; the API caps `limit` at 100.
@@ -28,7 +39,7 @@ export const REVIEW_MAX_RETAINED = 400;
  * cases whose primary frame was filed as COURT_READY, so those cases keep
  * appearing under `verified` as well.
  */
-export type ReviewTab = 'all' | 'pending' | 'verified' | 'rejected' | 'court_ready';
+export type ReviewTab = 'all' | 'pending' | 'verified' | 'rejected' | 'court_ready' | 'by_class';
 export type ReviewRange = 'all' | 'today' | 'week' | 'month';
 
 export interface DetectionFilters {
@@ -40,6 +51,8 @@ export interface DetectionFilters {
     from: string;
     /** Free-text scout search; maps to the API's `username` parameter. */
     q: string;
+    /** Named 5,000-image slice of the class, e.g. 'B'. '' means the whole class. */
+    batch: string;
 }
 
 export const EMPTY_FILTERS: DetectionFilters = {
@@ -48,9 +61,10 @@ export const EMPTY_FILTERS: DetectionFilters = {
     range: 'all',
     from: '',
     q: '',
+    batch: '',
 };
 
-const TABS: ReviewTab[] = ['all', 'pending', 'verified', 'rejected', 'court_ready'];
+const TABS: ReviewTab[] = ['all', 'pending', 'verified', 'rejected', 'court_ready', 'by_class'];
 
 export const REVIEW_COURT_READY = 'COURT_READY';
 const RANGES: ReviewRange[] = ['all', 'today', 'week', 'month'];
@@ -73,11 +87,14 @@ export function toApiParams(filters: DetectionFilters, limit: number, offset: nu
     if (filters.tab === 'court_ready') {
         params.set('verification_status', 'verified');
         params.set('review_status', REVIEW_COURT_READY);
-    } else if (filters.tab !== 'all') {
+    } else if (filters.tab !== 'all' && filters.tab !== 'by_class') {
+        // 'by_class' is a progress view, not a status; it never filters rows.
         params.set('verification_status', filters.tab);
     }
     if (filters.q) params.set('username', filters.q);
     if (filters.from) params.set('date_from', filters.from);
+    // Only meaningful alongside a class; the server ignores it otherwise.
+    if (filters.type && filters.batch) params.set('batch', filters.batch);
     return params;
 }
 
@@ -92,6 +109,7 @@ export function toReviewParams(filters: DetectionFilters, index: number, total: 
         if (filters.from) params.set('from', filters.from);
     }
     if (filters.q) params.set('q', filters.q);
+    if (filters.type && filters.batch) params.set('batch', filters.batch);
     if (total > 0) params.set('total', String(total));
     return params;
 }
@@ -106,6 +124,7 @@ export function toGridParams(filters: DetectionFilters, page: number): URLSearch
         if (filters.from) params.set('from', filters.from);
     }
     if (filters.q) params.set('q', filters.q);
+    if (filters.type && filters.batch) params.set('batch', filters.batch);
     if (page > 0) params.set('page', String(page));
     return params;
 }
@@ -114,7 +133,10 @@ export function parseFilters(search: URLSearchParams): DetectionFilters {
     const rawTab = search.get('tab') as ReviewTab | null;
     const rawRange = search.get('range') as ReviewRange | null;
 
-    const tab = rawTab && TABS.includes(rawTab) ? rawTab : 'all';
+    // 'pending' is the default because the grid no longer offers an
+    // "All cases" tab; falling back to 'all' would select a tab that is not
+    // rendered, leaving nothing highlighted.
+    const tab = rawTab && TABS.includes(rawTab) ? rawTab : 'pending';
     const range = rawRange && RANGES.includes(rawRange) ? rawRange : 'all';
 
     // An arbitrary `from` reaches Postgres as $n::date, where a malformed value
@@ -122,7 +144,14 @@ export function parseFilters(search: URLSearchParams): DetectionFilters {
     const rawFrom = search.get('from') ?? '';
     const from = range === 'all' ? '' : ISO_DATE.test(rawFrom) ? rawFrom : resolveDateFrom(range);
 
-    return { tab, type: search.get('type') ?? '', range, from, q: (search.get('q') ?? '').trim() };
+    return {
+        tab,
+        type: search.get('type') ?? '',
+        range,
+        from,
+        q: (search.get('q') ?? '').trim(),
+        batch: (search.get('batch') ?? '').trim().toUpperCase(),
+    };
 }
 
 export function parseIndex(search: URLSearchParams): number | null {
@@ -153,7 +182,7 @@ export function matchesTab(
     verificationStatus: string | null | undefined,
     reviewStatus: string | null | undefined
 ): boolean {
-    if (tab === 'all') return true;
+    if (tab === 'all' || tab === 'by_class') return true;
     if (tab === 'court_ready') {
         return verificationStatus === 'verified' && reviewStatus === REVIEW_COURT_READY;
     }
@@ -162,7 +191,7 @@ export function matchesTab(
 
 /** Any change here invalidates a cached review sequence. */
 export function filterSignature(filters: DetectionFilters): string {
-    return `${filters.tab}|${filters.type}|${filters.from}|${filters.q}`;
+    return `${filters.tab}|${filters.type}|${filters.from}|${filters.q}|${filters.batch}`;
 }
 
 /** Where a window of REVIEW_WINDOW rows should start to keep `index` centred. */

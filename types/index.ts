@@ -97,8 +97,13 @@ export interface Country {
 
 export interface DetectionTypeCount {
     detection_type: string;
+    /** All-time size of the class; does not fall as cases are reviewed. */
     total: number;
     pending: number;
+    verified?: number;
+    rejected?: number;
+    /** Verified cases whose primary frame was filed as court ready. */
+    court_ready?: number;
 }
 
 export interface ScoutAnalytics {

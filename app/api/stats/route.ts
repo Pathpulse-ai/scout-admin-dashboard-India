@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { pool } from '@/lib/db';
-import { indiaGeoPredicate } from '@/lib/region';
+import { GEO_VERSION, indiaGeoPredicate } from '@/lib/region';
+import { COUNT_TTL_MS, cached } from '@/lib/queryCache';
 
 /**
  * Console-wide totals.
@@ -11,8 +12,10 @@ import { indiaGeoPredicate } from '@/lib/region';
  */
 export async function GET() {
     try {
+        // Both aggregates touch every India row; they are recomputed at most
+        // once per TTL rather than on every page load.
         const [totals, byType] = await Promise.all([
-            pool.query(`
+            cached(`stats:totals|${GEO_VERSION}`, COUNT_TTL_MS, async () => (await pool.query(`
             SELECT
                 COUNT(*)::int AS total_submissions,
                 COUNT(*) FILTER (WHERE s.verification_status = 'verified')::int AS verified,
@@ -21,19 +24,19 @@ export async function GET() {
                 COALESCE(SUM(s.frame_count), 0)::int AS total_frames
             FROM submissions s
             WHERE ${indiaGeoPredicate('s')}
-        `),
-            pool.query(`
+        `)).rows),
+            cached(`stats:by-type|${GEO_VERSION}`, COUNT_TTL_MS, async () => (await pool.query(`
             SELECT s.detection_type, COUNT(*)::int AS count
             FROM submissions s
             WHERE ${indiaGeoPredicate('s')}
             GROUP BY s.detection_type
             ORDER BY count DESC
-        `),
+        `)).rows),
         ]);
 
         return NextResponse.json({
-            ...totals.rows[0],
-            detection_types: byType.rows,
+            ...totals[0],
+            detection_types: byType,
         });
     } catch (error: unknown) {
         const message = error instanceof Error ? error.message : 'Server error';

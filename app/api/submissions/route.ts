@@ -1,15 +1,28 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { pool } from '@/lib/db';
-import { indiaGeoPredicate } from '@/lib/region';
+import { GEO_VERSION, indiaGeoPredicate } from '@/lib/region';
 import {
   mapSubmissionRow,
   SUBMISSION_SELECT,
   SUBMISSION_IMAGE_COLUMNS,
   SUBMISSION_IMAGE_ORDER,
 } from '@/lib/submissions';
+import { CLASS_SIZE_TTL_MS, COUNT_TTL_MS, cached } from '@/lib/queryCache';
+import { batchPredicate, findBatch } from '@/lib/detectionBatches';
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 100;
+
+/**
+ * Below this many rows in a class, the ordered index walk is the WRONG plan.
+ *
+ * Ordering by captured_at makes Postgres scan that index backwards, testing
+ * each row against the class filter. For a class with 66 rows scattered through
+ * 2.7M that walk read 326k buffers and took 22 seconds to find 9 matches. A
+ * plain filter-then-sort reads the table once and returns the ENTIRE class in
+ * 8.5s, so below this threshold we force that plan and fetch the lot.
+ */
+const RARE_CLASS_ROWS = 5000;
 
 function toPositiveInt(raw: string | null, fallback: number, max?: number) {
   const parsed = Number.parseInt(raw ?? '', 10);
@@ -31,6 +44,8 @@ export async function GET(request: NextRequest) {
   // Counting the filtered set scans millions of rows. A caller that already
   // knows the total (the review page, stepping between windows) opts out.
   const skipCount = searchParams.get('count') === 'skip';
+  // A named slice of the class, e.g. 'B' for images 5,001-10,000.
+  const batchLabelParam = searchParams.get('batch');
 
   try {
     const params: (string | number)[] = [];
@@ -51,6 +66,15 @@ export async function GET(request: NextRequest) {
       params.push(`%${username}%`);
       where += ` AND u.username ILIKE $${params.length}`;
     }
+    // Resolved server-side from the cached boundaries, so the client only ever
+    // sends a letter rather than a pair of keyset cursors.
+    const batch = await findBatch(detectionType, batchLabelParam);
+    if (batch) {
+      const { sql, params: batchParams } = batchPredicate(batch, 's', params.length + 1);
+      where += sql;
+      params.push(...batchParams);
+    }
+
     if (reviewStatus) {
       // The officer's per-image verdict, filed against the primary frame.
       params.push(reviewStatus);
@@ -84,29 +108,117 @@ export async function GET(request: NextRequest) {
       where += ` AND ${capturedAt} < ($${params.length}::date + INTERVAL '1 day')`;
     }
 
-    const pageQuery = `
-      SELECT ${SUBMISSION_SELECT}
-      FROM submissions s
-      LEFT JOIN users u ON u.id = s.account_id
-      ${where}
-      ORDER BY ${capturedAt} DESC, s.id ASC
-      LIMIT $${params.length + 1} OFFSET $${params.length + 2}
-    `;
-
-    const countQuery = `
+    // Inside a batch the answer can never exceed the batch size, so the count
+    // is bounded. The LIMIT is what lets Postgres stop early on the index range
+    // instead of planning an unbounded aggregate: on with_helmet that is the
+    // difference between well under a second and over a minute.
+    const countQuery = batch
+      ? `
+      SELECT COUNT(*)::int AS total FROM (
+        SELECT 1
+        FROM submissions s
+        LEFT JOIN users u ON u.id = s.account_id
+        ${where}
+        LIMIT ${batch.size}
+      ) bounded
+    `
+      : `
       SELECT COUNT(*)::int AS total
       FROM submissions s
       LEFT JOIN users u ON u.id = s.account_id
       ${where}
     `;
 
-    const [pageResult, countResult] = await Promise.all([
-      pool.query(pageQuery, [...params, limit, offset]),
-      skipCount ? Promise.resolve(null) : pool.query(countQuery, params),
-    ]);
+    // The count is identical for every page of the same filter, so it is keyed
+    // on the filter alone and survives paging, tab switches and other reviewers.
+    const filterKey = `count|${GEO_VERSION}|${where}|${JSON.stringify(params)}`;
+    const countPromise = skipCount
+      ? Promise.resolve(null)
+      : cached(filterKey, COUNT_TTL_MS, async () => {
+          const { rows } = await pool.query(countQuery, params);
+          return (rows[0]?.total ?? 0) as number;
+        });
 
-    const rows = pageResult.rows;
-    const total: number | null = skipCount ? null : (countResult?.rows[0]?.total ?? 0);
+    // How big is this class? Cached for half an hour and used only to choose a
+    // query plan, so a stale value costs nothing worse than the old behaviour.
+    let classSize: number | null = null;
+    if (detectionType) {
+      classSize = await cached(`class|${GEO_VERSION}|${detectionType}`, CLASS_SIZE_TTL_MS, async () => {
+        const { rows } = await pool.query(
+          `SELECT COUNT(*)::int AS n FROM submissions s
+           WHERE ${indiaGeoPredicate('s')} AND s.detection_type = $1`,
+          [detectionType]
+        );
+        return (rows[0]?.n ?? 0) as number;
+      });
+    }
+
+    const isRareClass = classSize !== null && classSize > 0 && classSize <= RARE_CLASS_ROWS;
+
+    let rows: Record<string, unknown>[];
+    let total: number | null;
+
+    if (isRareClass) {
+      // A rare class is expensive to ORDER once and cheap to hold. Resolve the
+      // whole class to an ordered list of ids ONCE, cache that, then serve
+      // every page as a primary-key lookup.
+      //
+      // MATERIALIZED stops the planner pushing the ORDER BY into the
+      // captured_at index, where it would walk hundreds of thousands of rows
+      // hunting for a handful of matches: 22s, versus 8.5s to scan and sort.
+      const orderedIds = await cached<string[]>(
+        `ids|${GEO_VERSION}|${where}|${JSON.stringify(params)}`,
+        COUNT_TTL_MS,
+        async () => {
+          const { rows: idRows } = await pool.query(
+            `WITH matched AS MATERIALIZED (
+               SELECT s.id, s.captured_at
+               FROM submissions s
+               LEFT JOIN users u ON u.id = s.account_id
+               ${where}
+             )
+             SELECT id FROM matched
+             ORDER BY captured_at DESC, id DESC
+             LIMIT ${RARE_CLASS_ROWS}`,
+            params
+          );
+          return idRows.map((r) => r.id as string);
+        }
+      );
+
+      // The ordered list IS the count, so no separate counting query runs.
+      total = skipCount ? null : orderedIds.length;
+      const slice = orderedIds.slice(offset, offset + limit);
+
+      if (slice.length === 0) {
+        rows = [];
+      } else {
+        const { rows: pageRows } = await pool.query(
+          `SELECT ${SUBMISSION_SELECT}
+           FROM submissions s
+           LEFT JOIN users u ON u.id = s.account_id
+           WHERE s.id = ANY($1::uuid[])
+           ORDER BY ${capturedAt} DESC, s.id DESC`,
+          [slice]
+        );
+        rows = pageRows;
+      }
+    } else {
+      const pageQuery = `
+        SELECT ${SUBMISSION_SELECT}
+        FROM submissions s
+        LEFT JOIN users u ON u.id = s.account_id
+        ${where}
+        ORDER BY ${capturedAt} DESC, s.id DESC
+        LIMIT $${params.length + 1} OFFSET $${params.length + 2}
+      `;
+      const [pageResult, countResult] = await Promise.all([
+        pool.query(pageQuery, [...params, limit, offset]),
+        countPromise,
+      ]);
+      rows = pageResult.rows;
+      total = skipCount ? null : (countResult ?? 0);
+    }
 
     const imagesBySubmission: Record<string, Record<string, unknown>[]> = {};
     if (rows.length > 0) {
@@ -136,9 +248,10 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    const submissions = rows.map((row) =>
-      mapSubmissionRow(row, imagesBySubmission[row.id] ?? [], reviewBySubmission[row.id] ?? null)
-    );
+    const submissions = rows.map((row) => {
+      const id = row.id as string;
+      return mapSubmissionRow(row, imagesBySubmission[id] ?? [], reviewBySubmission[id] ?? null);
+    });
 
     return NextResponse.json({
       submissions,
@@ -146,6 +259,8 @@ export async function GET(request: NextRequest) {
       count: submissions.length,
       limit,
       offset,
+      class_size: classSize,
+      batch: batch ? { label: batch.label, start_rank: batch.startRank, size: batch.size } : null,
       has_more: total === null ? rows.length === limit : offset + rows.length < total,
     });
   } catch (error: unknown) {
