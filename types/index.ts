@@ -48,6 +48,31 @@ export interface Submission {
     has_video: boolean;
     has_images: boolean;
     images: SubmissionImage[];
+    /**
+     * Set when the record is a frame or clip filed from Video annotation.
+     * It is shaped like a submission so the grid and the review page render
+     * it with the same code, but it has no scout, earns no beats and is
+     * validated the moment it is saved.
+     */
+    capture?: VideoCapture | null;
+}
+
+/** A frame or clip an officer captured on the Video annotation page. */
+export interface VideoCapture {
+    kind: 'frame' | 'clip';
+    /** 'library' = an officer upload, 'submission' = a scout's video. */
+    source_kind: 'library' | 'submission';
+    source_video_id: string | null;
+    source_submission_id: string | null;
+    /** Display name of the video it was taken from. */
+    source_name: string | null;
+    /** Seconds into the video where the capture key was pressed. */
+    video_time_s: number;
+    clip_start_s: number | null;
+    clip_end_s: number | null;
+    content_type: string;
+    byte_size: number;
+    media_url: string;
 }
 
 export interface Stats {
@@ -57,6 +82,8 @@ export interface Stats {
     pending: number;
     total_frames: number;
     total_videos?: number;
+    /** Frames and clips filed from Video annotation; all are validated. */
+    validated_captures?: number;
     detection_types: { detection_type: string; count: number }[];
 }
 
@@ -104,6 +131,10 @@ export interface DetectionTypeCount {
     rejected?: number;
     /** Verified cases whose primary frame was filed as court ready. */
     court_ready?: number;
+    /** Frames and clips filed from Video annotation under this class. */
+    captures?: number;
+    /** Those captures that an officer went on to file as court ready. */
+    captures_court_ready?: number;
 }
 
 export interface ScoutAnalytics {
@@ -115,4 +146,32 @@ export interface ScoutAnalytics {
         country_code: string;
         submission_count: number;
     }[];
+}
+
+/** One part of a split library video: a time range of the same stored file. */
+export interface LibraryFragmentRecord {
+    id: string;
+    /** 1-based order within the video. */
+    position: number;
+    start_s: number;
+    end_s: number;
+}
+
+/** One finished Video Library upload, as /api/library/videos returns it. */
+export interface LibraryVideoRecord {
+    id: string;
+    name: string;
+    file_name: string;
+    content_type: string;
+    size_bytes: number;
+    /** 'device' = chosen from disk, 'drive' = imported from Google Drive. */
+    source: 'device' | 'drive';
+    /** Length in seconds, known once the video has been split. */
+    duration_s: number | null;
+    /** Empty when the video has not been split into parts. */
+    fragments: LibraryFragmentRecord[];
+    created_at: string;
+    ready_at: string | null;
+    /** Presigned playback URL, valid for hours; null while an upload is still open. */
+    url: string | null;
 }

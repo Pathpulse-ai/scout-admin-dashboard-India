@@ -7,6 +7,15 @@
  */
 
 export const GRID_PAGE_SIZE = 9;
+
+/**
+ * Images per named work packet for a large class.
+ *
+ * Lives here rather than in lib/detectionBatches, which imports the database
+ * pool: importing that from a client component pulls `pg` into the browser
+ * bundle and the build fails on `Can't resolve 'fs'`.
+ */
+export const BATCH_SIZE = 5000;
 export const GRID_BATCH_PAGES = 5;
 export const GRID_BATCH_SIZE = GRID_PAGE_SIZE * GRID_BATCH_PAGES;   // 45, under the API's limit of 100
 

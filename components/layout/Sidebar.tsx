@@ -7,6 +7,7 @@ import {
     LayoutDashboard,
     Scan,
     Upload,
+    Clapperboard,
     Users,
     X,
     ChevronLeft,
@@ -38,6 +39,12 @@ const navigationItems = [
         label: "Video upload",
         icon: Upload,
         href: "/video-upload",
+    },
+    {
+        id: "video-annotation",
+        label: "Video annotation",
+        icon: Clapperboard,
+        href: "/video-annotation",
     },
 ];
 

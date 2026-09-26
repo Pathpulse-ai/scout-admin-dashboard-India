@@ -1,102 +1,116 @@
 /**
- * Browser-side store for the Video Library page.
+ * The browser's view of the Video Library.
  *
- * There is no upload API yet, so videos are kept in the browser's IndexedDB.
- * localStorage cannot hold video blobs, and plain component state would lose
- * the library on refresh. Each record carries the original File as a Blob so
- * a preview can be rebuilt with URL.createObjectURL on the next visit.
+ * Videos live in S3 and are catalogued in Postgres. This module lists and
+ * removes them; uploads go through lib/multipartUpload. Client-safe: no
+ * server imports.
  */
+import { LibraryFragmentRecord, LibraryVideoRecord } from "@/types";
 
-const DB_NAME = "pathpulse-video-library";
-const DB_VERSION = 1;
-const STORE = "videos";
-
-export interface StoredVideo {
+/** One part of a split video: a time range of the same stored file. */
+export interface LibraryFragment {
     id: string;
-    /** Display name entered by the user. */
+    /** 1-based order within the video. */
+    position: number;
+    startS: number;
+    endS: number;
+}
+
+export interface LibraryVideo {
+    id: string;
+    /** Display name entered by the officer. */
     name: string;
     /** Original file name, kept for reference. */
     fileName: string;
-    /** MIME type reported by the browser, e.g. "video/mp4". */
+    /** MIME type stored on the object, e.g. "video/mp4". */
     type: string;
     /** Size in bytes. */
     size: number;
-    /** ISO timestamp of when it was added. */
+    source: "device" | "drive";
+    /** Length in seconds, known once the video has been split. */
+    durationS: number | null;
+    /** Empty when the video has not been split into parts. */
+    fragments: LibraryFragment[];
+    /** ISO timestamp of when the upload finished. */
     createdAt: string;
-    blob: Blob;
+    /** Presigned playback URL. Valid for hours; a reload fetches a fresh one. */
+    url: string;
 }
 
-function isIndexedDbAvailable() {
-    return typeof indexedDB !== "undefined";
+export function toLibraryFragment(record: LibraryFragmentRecord): LibraryFragment {
+    return { id: record.id, position: record.position, startS: record.start_s, endS: record.end_s };
 }
 
-function openDb(): Promise<IDBDatabase> {
-    return new Promise((resolve, reject) => {
-        if (!isIndexedDbAvailable()) {
-            reject(new Error("This browser does not support local video storage."));
-            return;
-        }
-        const request = indexedDB.open(DB_NAME, DB_VERSION);
-        request.onupgradeneeded = () => {
-            const db = request.result;
-            if (!db.objectStoreNames.contains(STORE)) {
-                db.createObjectStore(STORE, { keyPath: "id" });
-            }
-        };
-        request.onsuccess = () => resolve(request.result);
-        request.onerror = () => reject(request.error ?? new Error("Could not open the video library."));
-        request.onblocked = () => reject(new Error("The video library is open in another tab."));
+export function toLibraryVideo(record: LibraryVideoRecord): LibraryVideo {
+    return {
+        id: record.id,
+        name: record.name,
+        fileName: record.file_name,
+        type: record.content_type,
+        size: record.size_bytes,
+        source: record.source,
+        durationS: record.duration_s ?? null,
+        fragments: (record.fragments ?? []).map(toLibraryFragment),
+        createdAt: record.ready_at ?? record.created_at,
+        url: record.url ?? "",
+    };
+}
+
+/**
+ * Split a video into equal parts, replacing any earlier split. Parts are
+ * time ranges of the same file; nothing is copied, and captures already
+ * taken stay with the video.
+ */
+export async function splitVideo(id: string, parts: number, durationS: number): Promise<LibraryVideo> {
+    const res = await fetch(`/api/library/videos/${id}/fragments`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ parts, duration_s: durationS }),
     });
+    if (!res.ok) throw new Error(await errorMessage(res, "Could not split the video."));
+    const data = (await res.json()) as { video: LibraryVideoRecord };
+    return toLibraryVideo(data.video);
 }
 
-/** Runs one request inside a transaction and resolves with its result. */
-async function withStore<T>(
-    mode: IDBTransactionMode,
-    action: (store: IDBObjectStore) => IDBRequest<T>
-): Promise<T> {
-    const db = await openDb();
+export async function unsplitVideo(id: string): Promise<LibraryVideo> {
+    const res = await fetch(`/api/library/videos/${id}/fragments`, { method: "DELETE" });
+    if (!res.ok) throw new Error(await errorMessage(res, "Could not remove the split."));
+    const data = (await res.json()) as { video: LibraryVideoRecord };
+    return toLibraryVideo(data.video);
+}
+
+/** "1:02:03" past an hour, else "12:34". */
+export function formatClockLong(seconds: number): string {
+    const total = Math.max(0, Math.floor(Number.isFinite(seconds) ? seconds : 0));
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const s = total % 60;
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+}
+
+/** The API's error message when it sent one, else a fallback with the status. */
+export async function errorMessage(res: Response, fallback: string): Promise<string> {
     try {
-        return await new Promise<T>((resolve, reject) => {
-            const tx = db.transaction(STORE, mode);
-            const request = action(tx.objectStore(STORE));
-            let result: T | undefined;
-            request.onsuccess = () => {
-                result = request.result;
-            };
-            request.onerror = () => reject(request.error ?? new Error("Video library request failed."));
-            // A write is only durable once the transaction commits. Chrome checks
-            // storage quota at commit time and reports it on the transaction, so
-            // resolving on the request alone would report a save that never landed.
-            tx.oncomplete = () => resolve(result as T);
-            tx.onabort = () =>
-                reject(tx.error ?? request.error ?? new Error("Video library transaction aborted."));
-            tx.onerror = () =>
-                reject(tx.error ?? request.error ?? new Error("Video library transaction failed."));
-        });
-    } finally {
-        db.close();
+        const body = (await res.json()) as { error?: unknown };
+        if (typeof body?.error === "string" && body.error) return body.error;
+    } catch {
+        // not JSON
     }
+    return `${fallback} (HTTP ${res.status})`;
 }
 
-/** Every stored video, newest first. */
-export async function listVideos(): Promise<StoredVideo[]> {
-    const rows = await withStore<StoredVideo[]>("readonly", (store) => store.getAll());
-    return rows.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-}
-
-export async function saveVideo(video: StoredVideo): Promise<void> {
-    await withStore("readwrite", (store) => store.put(video));
+/** Every finished video, newest first. */
+export async function listVideos(): Promise<LibraryVideo[]> {
+    const res = await fetch("/api/library/videos", { cache: "no-store" });
+    if (!res.ok) throw new Error(await errorMessage(res, "Could not load the video library."));
+    const data = (await res.json()) as { videos: LibraryVideoRecord[] };
+    return (data.videos ?? []).filter((v) => v.url).map(toLibraryVideo);
 }
 
 export async function removeVideo(id: string): Promise<void> {
-    await withStore("readwrite", (store) => store.delete(id));
-}
-
-export function newVideoId(): string {
-    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-        return crypto.randomUUID();
-    }
-    return `vid-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    const res = await fetch(`/api/library/videos/${id}`, { method: "DELETE" });
+    if (!res.ok) throw new Error(await errorMessage(res, "Could not remove this video."));
 }
 
 /** Human-readable size: "0 MB", "12.4 MB", "1.2 GB". */
@@ -117,9 +131,9 @@ export function formatBytes(bytes: number): string {
  * True when the file is a video. The MIME type is the first check; some
  * platforms leave it empty, so the extension is the fallback.
  */
-export function isVideoFile(file: File): boolean {
+export function isVideoFile(file: { type: string; name: string }): boolean {
     if (file.type) return file.type.startsWith("video/");
-    return /\.(mp4|mov|m4v|webm|mkv|avi|mpg|mpeg|3gp|ogv)$/i.test(file.name);
+    return /\.(mp4|mov|m4v|webm|mkv|avi|mpg|mpeg|3gp|ogv|ts)$/i.test(file.name);
 }
 
 /** A default display name from the file name, without its extension. */

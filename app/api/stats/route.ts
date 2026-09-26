@@ -34,8 +34,16 @@ export async function GET() {
         `)).rows),
         ]);
 
+        // Captures from Video annotation are validated evidence too. The table
+        // is small and changes as officers work, so it is counted live rather
+        // than through the cache the heavy aggregates use.
+        const { rows: captureRows } = await pool.query(
+            `SELECT COUNT(*)::int AS n FROM video_annotations`
+        );
+
         return NextResponse.json({
             ...totals[0],
+            validated_captures: captureRows[0]?.n ?? 0,
             detection_types: byType,
         });
     } catch (error: unknown) {

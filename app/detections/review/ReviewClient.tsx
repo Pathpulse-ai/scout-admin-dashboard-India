@@ -7,7 +7,9 @@ import {
     ArrowLeft,
     ArrowRight,
     Check,
+    Clock,
     Film,
+    Gavel,
     ImageOff,
     Keyboard,
     Loader2,
@@ -19,9 +21,18 @@ import {
 import { Submission, VerificationStatus } from "@/types";
 import CourtReadyDialog from "@/components/detections/CourtReadyDialog";
 import { cn } from "@/lib/utils";
+import { formatBytes } from "@/lib/videoLibrary";
+import {
+    CAPTURE_SOURCE_PARAM,
+    CAPTURE_SOURCE_VALUE,
+    VideoAnnotationItem,
+    captureToSubmission,
+    describeCapturePosition,
+} from "@/lib/captures";
 import {
     DetectionFilters,
     GRID_PAGE_SIZE,
+    REVIEW_COURT_READY,
     REVIEW_EDGE_MARGIN,
     REVIEW_MAX_RETAINED,
     REVIEW_WINDOW,
@@ -119,8 +130,14 @@ export default function ReviewClient() {
     const urlIndex = useMemo(() => parseIndex(search), [search]);
     const totalHint = useMemo(() => parseTotalHint(search), [search]);
     const urlCaseId = search.get("id") ?? "";
+    /**
+     * A frame or clip from Video annotation. Captures live outside the
+     * submissions sequence, so they walk a sequence of their own: the
+     * captures matching the same filters, in the order the grid lists them.
+     */
+    const isCapture = search.get(CAPTURE_SOURCE_PARAM) === CAPTURE_SOURCE_VALUE;
 
-    /** A deep link with no index has no sequence to walk; show the one case. */
+    /** A deep link with no index has no sequence to walk; show the one record. */
     const isStandalone = urlIndex === null;
 
     const [index, setIndex] = useState(urlIndex ?? 0);
@@ -183,17 +200,48 @@ export default function ReviewClient() {
             setLoadError(null);
             try {
                 if (isStandalone) {
-                    const res = await fetch(`/api/submissions/${urlCaseId}`, {
+                    const res = await fetch(
+                        isCapture ? `/api/annotations/${urlCaseId}` : `/api/submissions/${urlCaseId}`,
+                        { cache: "no-store", signal: controller.signal }
+                    );
+                    if (!res.ok) throw new Error(`Request failed with status ${res.status}`);
+                    const data = (await res.json()) as {
+                        submission?: Submission;
+                        annotation?: VideoAnnotationItem;
+                    };
+                    if (cancelled) return;
+                    const record = isCapture
+                        ? data.annotation
+                            ? captureToSubmission(data.annotation)
+                            : null
+                        : data.submission ?? null;
+                    setItems(record ? [record] : []);
+                    setWindowStart(0);
+                    setIndex(0);
+                    setTotal(1);
+                } else if (isCapture) {
+                    // Metadata only, and capped at 500 by the API, so the whole
+                    // sequence is held at once and stepping costs nothing. The
+                    // query matches the grid's exactly, or the indices would
+                    // point at different records.
+                    const query = new URLSearchParams({ limit: "500" });
+                    if (filters.tab === "court_ready") query.set("review_status", REVIEW_COURT_READY);
+                    if (filters.type) query.set("detection_type", filters.type);
+                    if (filters.from) query.set("date_from", filters.from);
+
+                    const res = await fetch(`/api/annotations?${query.toString()}`, {
                         cache: "no-store",
                         signal: controller.signal,
                     });
                     if (!res.ok) throw new Error(`Request failed with status ${res.status}`);
-                    const data = (await res.json()) as { submission: Submission };
+                    const data = (await res.json()) as { annotations: VideoAnnotationItem[] };
                     if (cancelled) return;
-                    setItems(data.submission ? [data.submission] : []);
+
+                    const rows = (data.annotations ?? []).map(captureToSubmission);
+                    setItems(rows);
                     setWindowStart(0);
-                    setIndex(0);
-                    setTotal(1);
+                    setTotal(rows.length);
+                    if (rows.length > 0 && index > rows.length - 1) setIndex(rows.length - 1);
                 } else {
                     const knownTotal = total > 0 ? total : index + REVIEW_WINDOW;
                     const targetStart = windowStartFor(index, knownTotal);
@@ -239,7 +287,7 @@ export default function ReviewClient() {
             controller.abort();
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [signature, index, needsWindow, isStandalone, urlCaseId]);
+    }, [signature, index, needsWindow, isStandalone, isCapture, urlCaseId]);
 
     // Cancel only on unmount. Aborting mid-flight would not undo a committed UPDATE.
     useEffect(() => () => abortRef.current?.abort(), []);
@@ -252,7 +300,8 @@ export default function ReviewClient() {
     const prefetchingRef = useRef<Set<number>>(new Set());
 
     useEffect(() => {
-        if (isStandalone || isLoading || items.length === 0) return;
+        // A capture sequence is already held whole; there is nothing to prefetch.
+        if (isStandalone || isCapture || isLoading || items.length === 0) return;
 
         const loadedEnd = windowStart + items.length;
         const nearEnd = index >= loadedEnd - REVIEW_EDGE_MARGIN;
@@ -323,17 +372,18 @@ export default function ReviewClient() {
             controller.abort();
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [index, windowStart, items, total, isLoading, isStandalone, signature]);
+    }, [index, windowStart, items, total, isLoading, isStandalone, isCapture, signature]);
 
     /** Keep the URL honest without stacking one history entry per keypress. */
     const syncUrl = useCallback(
         (nextIndex: number, nextId: string) => {
             const params = toReviewParams(filters, nextIndex, total);
+            if (isCapture) params.set(CAPTURE_SOURCE_PARAM, CAPTURE_SOURCE_VALUE);
             params.set("id", nextId);
             // Query-only replace: same mount, so the loaded window survives.
             router.replace(`/detections/review?${params.toString()}`, { scroll: false });
         },
-        [filters, total, router]
+        [filters, total, router, isCapture]
     );
 
     const goBy = useCallback(
@@ -440,10 +490,131 @@ export default function ReviewClient() {
     /** Validate always asks the court-ready question first. */
     const askCourtReady = useCallback(() => {
         const target = isStandalone ? items[0] : items[index - windowStart];
-        if (!target || actingRef.current) return;
+        // A capture was validated when it was saved; there is nothing to ask.
+        if (!target || target.capture || actingRef.current) return;
         setActionError(null);
         setCourtPromptFor(target.id);
     }, [items, index, windowStart, isStandalone]);
+
+    /**
+     * Drop the open capture out of the held sequence, so the cursor lands on
+     * the one after it without a refetch. The grid is the only place left to
+     * go when it was the last of them.
+     */
+    const dropFromSequence = useCallback(
+        (id: string) => {
+            const remaining = items.filter((s) => s.id !== id);
+            if (remaining.length === 0) {
+                router.push(gridHref);
+                return;
+            }
+            setItems(remaining);
+            setTotal(remaining.length);
+            setIndex((i) => Math.min(i, remaining.length - 1));
+        },
+        [items, router, gridHref]
+    );
+
+    /**
+     * File this validated record as court ready, or take that back.
+     *
+     * A scout case and a capture are recorded on the same table but through
+     * different endpoints, because only a case has a verification status to
+     * carry along with it.
+     */
+    const setCourtReady = useCallback(
+        async (next: boolean) => {
+            const target = isStandalone ? items[0] : items[index - windowStart];
+            if (!target || actingRef.current) return;
+            if (target.verification_status !== "verified") return;
+
+            actingRef.current = true;
+            setIsActing(true);
+            setActionError(null);
+
+            const targetId = target.id;
+            const targetIndex = index;
+            const previousReview = target.review_status ?? null;
+            // The record's own kind, not the sequence's: it picks the endpoint.
+            const targetIsCapture = Boolean(target.capture);
+
+            try {
+                const res = await fetch(
+                    targetIsCapture ? `/api/annotations/${targetId}` : `/api/submissions/${targetId}/verify`,
+                    {
+                        method: "PATCH",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify(
+                            targetIsCapture ? { court_ready: next } : { status: "verified", court_ready: next }
+                        ),
+                    }
+                );
+                if (!res.ok) {
+                    const detail = (await res.json().catch(() => null)) as { error?: string } | null;
+                    throw new Error(detail?.error ?? `Update failed (HTTP ${res.status})`);
+                }
+                const saved = (await res.json()) as {
+                    review_status?: string | null;
+                    annotation?: { review_status: string | null };
+                };
+                const reviewStatus = targetIsCapture
+                    ? saved.annotation?.review_status ?? null
+                    : saved.review_status ?? null;
+
+                setItems((prev) =>
+                    prev.map((s) =>
+                        s.id === targetId
+                            ? { ...s, review_status: reviewStatus, court_ready: reviewStatus === REVIEW_COURT_READY }
+                            : s
+                    )
+                );
+
+                // Taking it back under the Court ready tab drops the record out
+                // of the filter, which shifts every later row.
+                const wasInTab = matchesTab(filters.tab, target.verification_status, previousReview);
+                const stillInTab = matchesTab(filters.tab, target.verification_status, reviewStatus);
+                if (!isStandalone && wasInTab && !stillInTab) {
+                    if (isCapture) {
+                        dropFromSequence(targetId);
+                    } else {
+                        removedRef.current.add(targetIndex);
+                        goBy(1);
+                    }
+                }
+            } catch (err) {
+                setActionError((err as Error)?.message ?? "Could not file this decision.");
+            } finally {
+                actingRef.current = false;
+                setIsActing(false);
+            }
+        },
+        [items, index, windowStart, isStandalone, isCapture, filters.tab, goBy, dropFromSequence]
+    );
+
+    /**
+     * Dismissing a capture removes it. Unlike a case it has no pending or
+     * dismissed state to fall back to, so the officer is asked first.
+     */
+    const removeCapture = useCallback(async () => {
+        const target = isStandalone ? items[0] : items[index - windowStart];
+        if (!target?.capture || actingRef.current) return;
+        if (!window.confirm("Remove this capture from validated evidence? This cannot be undone.")) return;
+
+        actingRef.current = true;
+        setIsActing(true);
+        setActionError(null);
+        try {
+            const res = await fetch(`/api/annotations/${target.id}`, { method: "DELETE" });
+            if (!res.ok) throw new Error(`Remove failed (HTTP ${res.status})`);
+            if (isStandalone) router.push(gridHref);
+            else dropFromSequence(target.id);
+        } catch (err) {
+            setActionError((err as Error)?.message ?? "Could not remove the capture.");
+        } finally {
+            actingRef.current = false;
+            setIsActing(false);
+        }
+    }, [items, index, windowStart, isStandalone, router, gridHref, dropFromSequence]);
 
     const answerCourtReady = useCallback(
         async (courtReady: boolean) => {
@@ -474,16 +645,22 @@ export default function ReviewClient() {
             const isNext = e.key === "ArrowRight";
             const isValidate = e.key === "1" || e.code === "Numpad1";
             const isDismiss = e.key === "2" || e.code === "Numpad2";
+            const isCourt = e.key === "3" || e.code === "Numpad3";
 
-            // Only the four bound keys are cancelled, so Space still plays the
+            // Only the bound keys are cancelled, so Space still plays the
             // focused clip and the other arrows still scroll.
-            if (!isPrev && !isNext && !isValidate && !isDismiss) return;
+            if (!isPrev && !isNext && !isValidate && !isDismiss && !isCourt) return;
             e.preventDefault();
             e.stopPropagation();
 
             if (isPrev) goBy(-1);
             else if (isNext) goBy(1);
             else if (isValidate) askCourtReady();
+            else if (isCourt) {
+                if (current?.verification_status === "verified") {
+                    void setCourtReady(current.review_status !== REVIEW_COURT_READY);
+                }
+            } else if (current?.capture) void removeCapture();
             else void runAction("rejected");
         };
     });
@@ -507,6 +684,7 @@ export default function ReviewClient() {
     const primaryImage =
         current?.images?.find((img) => img.is_primary) ?? current?.images?.[0];
     const imageUrl = primaryImage?.image_url;
+    const capture = current?.capture ?? null;
 
     const position = total > 0 ? `${Math.min(index + 1, total)} of ${total.toLocaleString()}` : null;
 
@@ -551,6 +729,7 @@ export default function ReviewClient() {
                     { keys: "→", label: "Next" },
                     { keys: "1", label: "Validate" },
                     { keys: "2", label: "Dismiss" },
+                    { keys: "3", label: "Court ready" },
                 ].map((hint) => (
                     <span key={hint.label} className="flex items-center gap-1.5 text-[11px] font-semibold text-[#475569]">
                         <kbd className="bg-[#F1F5F9] border border-[#E2E8F0] rounded px-1.5 py-0.5 font-mono font-bold text-[10px] text-[#0F172A] min-w-[20px] text-center">
@@ -561,7 +740,9 @@ export default function ReviewClient() {
                 ))}
                 {isStandalone && (
                     <span className="text-[11px] font-semibold text-[#94A3B8]">
-                        Opened directly, so stepping through cases is off. Open one from the grid to review in sequence.
+                        {isCapture
+                            ? "Opened directly, so stepping through captures is off. Open one from the grid to review in sequence."
+                            : "Opened directly, so stepping through cases is off. Open one from the grid to review in sequence."}
                     </span>
                 )}
             </div>
@@ -599,6 +780,11 @@ export default function ReviewClient() {
                             src={videoUrl}
                             controls
                             playsInline
+                            muted
+                            data-silent=""
+                            onVolumeChange={(e) => {
+                                if (!e.currentTarget.muted) e.currentTarget.muted = true;
+                            }}
                             preload="metadata"
                             className="w-full h-full object-contain"
                         />
@@ -653,9 +839,14 @@ export default function ReviewClient() {
             <div className="flex flex-col sm:flex-row items-stretch gap-3">
                 <button
                     onClick={askCourtReady}
-                    disabled={!current || isActing}
+                    disabled={!current || isActing || !!capture}
+                    title={capture ? "Validated when it was captured" : undefined}
                     className={cn(
-                        "flex-1 py-3.5 rounded-2xl font-bold text-xs flex items-center justify-center gap-2 transition-all cursor-pointer disabled:opacity-50 disabled:pointer-events-none",
+                        "flex-1 py-3.5 rounded-2xl font-bold text-xs flex items-center justify-center gap-2 transition-all",
+                        // A capture's button is inert but not faded: it IS validated.
+                        capture
+                            ? "cursor-default pointer-events-none"
+                            : "cursor-pointer disabled:opacity-50 disabled:pointer-events-none",
                         current?.verification_status === "verified"
                             ? "bg-[#D1FAE5] text-[#065F46] border border-[#A7F3D0]"
                             : "bg-[#00DF89] hover:bg-[#00DF89]/90 text-slate-950 shadow-md shadow-[#00DF89]/20"
@@ -668,8 +859,32 @@ export default function ReviewClient() {
                     <kbd className="bg-black/10 rounded px-1.5 py-0.5 font-mono text-[10px]">1</kbd>
                 </button>
 
+                {/* The second decision on validated evidence: does this image
+                    stand as court evidence? */}
+                {current?.verification_status === "verified" && (
+                    <button
+                        onClick={() => void setCourtReady(current.review_status !== REVIEW_COURT_READY)}
+                        disabled={isActing}
+                        title={
+                            current.review_status === REVIEW_COURT_READY
+                                ? "Filed as court ready. Click to take it back."
+                                : "Add this image to court ready"
+                        }
+                        className={cn(
+                            "flex-1 py-3.5 rounded-2xl font-bold text-xs flex items-center justify-center gap-2 transition-all cursor-pointer disabled:opacity-50 disabled:pointer-events-none",
+                            current.review_status === REVIEW_COURT_READY
+                                ? "bg-[#1D4ED8] text-white shadow-md shadow-[#1D4ED8]/20"
+                                : "bg-[#EFF6FF] hover:bg-[#DBEAFE] text-[#1D4ED8] border border-[#BFDBFE]"
+                        )}
+                    >
+                        {isActing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Gavel className="w-4 h-4" />}
+                        <span>Court ready</span>
+                        <kbd className="bg-black/10 rounded px-1.5 py-0.5 font-mono text-[10px]">3</kbd>
+                    </button>
+                )}
+
                 <button
-                    onClick={() => void runAction("rejected")}
+                    onClick={() => (capture ? void removeCapture() : void runAction("rejected"))}
                     disabled={!current || isActing}
                     className={cn(
                         "flex-1 py-3.5 rounded-2xl font-bold text-xs flex items-center justify-center gap-2 transition-all cursor-pointer disabled:opacity-50 disabled:pointer-events-none",
@@ -688,33 +903,61 @@ export default function ReviewClient() {
 
             {/* Case record */}
             <div className="bg-white rounded-[22px] border border-[#E2E8F0] shadow-sm p-5 space-y-4">
-                <div className="flex items-center gap-4 text-[11px] font-semibold text-[#64748B]">
-                    <span className="flex items-center gap-1.5">
-                        <User className="w-3.5 h-3.5 text-[#94A3B8]" />
-                        {current?.username || "Unknown scout"}
-                    </span>
-                    <span className="flex items-center gap-1.5">
-                        <MapPin className="w-3.5 h-3.5 text-[#94A3B8]" />
-                        {current?.country_code || "Region not recorded"}
-                    </span>
+                <div className="flex items-center gap-4 text-[11px] font-semibold text-[#64748B] min-w-0">
+                    {capture ? (
+                        // Provenance for a capture is the video and the moment in
+                        // it, the way a case's is its scout and location.
+                        <>
+                            <span className="flex items-center gap-1.5 min-w-0">
+                                <Film className="w-3.5 h-3.5 text-[#94A3B8] shrink-0" />
+                                <span className="truncate">{capture.source_name || "Video"}</span>
+                            </span>
+                            <span className="flex items-center gap-1.5 shrink-0">
+                                <Clock className="w-3.5 h-3.5 text-[#94A3B8]" />
+                                {describeCapturePosition(capture)}
+                            </span>
+                        </>
+                    ) : (
+                        <>
+                            <span className="flex items-center gap-1.5">
+                                <User className="w-3.5 h-3.5 text-[#94A3B8]" />
+                                {current?.username || "Unknown scout"}
+                            </span>
+                            <span className="flex items-center gap-1.5">
+                                <MapPin className="w-3.5 h-3.5 text-[#94A3B8]" />
+                                {current?.country_code || "Region not recorded"}
+                            </span>
+                        </>
+                    )}
                 </div>
 
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-4 pt-1 border-t border-[#F1F5F9]">
                     <Field label="Violation type" value={current ? formatDetectionTypeLabel(current.detection_type) : null} />
                     <Field label="Status" value={current?.verification_status} />
-                    <Field
-                        label="Beats earned"
-                        value={current ? `${Number(current.beats_earned ?? 0).toFixed(2)} PTS` : null}
-                    />
-                    <Field label="Frames" value={current?.images?.length ?? null} />
+                    {capture ? (
+                        <>
+                            <Field label="Source video" value={capture.source_name} />
+                            <Field label="Position in video" value={describeCapturePosition(capture)} />
+                            <Field label="Scout" value={current?.username || null} />
+                            <Field label="Size" value={formatBytes(capture.byte_size)} />
+                        </>
+                    ) : (
+                        <>
+                            <Field
+                                label="Beats earned"
+                                value={current ? `${Number(current.beats_earned ?? 0).toFixed(2)} PTS` : null}
+                            />
+                            <Field label="Frames" value={current?.images?.length ?? null} />
+                        </>
+                    )}
                     <Field label="Latitude" value={current?.latitude ?? null} />
                     <Field label="Longitude" value={current?.longitude ?? null} />
                     <Field label="Captured" value={formatDateTime(current?.captured_at)} />
-                    <Field label="Submitted" value={formatDateTime(current?.created_at)} />
+                    {!capture && <Field label="Submitted" value={formatDateTime(current?.created_at)} />}
                     {current?.verification_status === "verified" && (
                         <Field label="Validated at" value={formatDateTime(current?.verified_at)} />
                     )}
-                    {current?.verification_status === "verified" && (
+                    {current?.verification_status === "verified" && !capture && (
                         <Field
                             label="Court ready"
                             value={
