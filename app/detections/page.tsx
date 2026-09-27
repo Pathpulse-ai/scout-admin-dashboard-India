@@ -13,15 +13,12 @@ import {
     ChevronDown,
     Loader2,
     MapPin,
-    User,
     Check,
     X,
     Maximize2,
     Film,
     ImageOff,
-    Gavel,
-    ChevronRight,
-    Layers
+    Gavel
 } from "lucide-react";
 import { Submission, Stats, DetectionTypeCount, VerificationStatus } from "@/types";
 import { cn } from "@/lib/utils";
@@ -31,7 +28,6 @@ import {
     CAPTURE_SOURCE_VALUE,
     VideoAnnotationItem,
     captureToSubmission,
-    describeCapturePosition,
     mergeCapturesByTime,
 } from "@/lib/captures";
 import {
@@ -39,7 +35,6 @@ import {
     ReviewRange,
     ReviewTab,
     parseFilters,
-    BATCH_SIZE,
     GRID_BATCH_SIZE,
     REVIEW_COURT_READY,
     batchIndexFor,
@@ -49,13 +44,9 @@ import {
 } from "@/lib/detectionFilters";
 
 const filterTabs = [
-    { id: "pending", label: "Pending review" },
     { id: "verified", label: "Validated" },
     // A subset of Validated, not a separate status: these cases show in both.
     { id: "court_ready", label: "Court ready" },
-    { id: "rejected", label: "Dismissed" },
-    // Not a status filter: a progress view across every class.
-    { id: "by_class", label: "By class", isView: true },
 ];
 
 // Friendly names for the classes whose raw value reads poorly; everything else
@@ -118,9 +109,6 @@ export default function DetectionsPage() {
      */
     const [batchCount, setBatchCount] = useState(1);
 
-    /** `by_class` renders a progress table instead of the evidence grid. */
-    const isClassView = activeTab === "by_class";
-
     /**
      * Large classes are split into fixed 5,000-image packets. '' is the whole
      * class; 'A', 'B', ... select one packet.
@@ -129,75 +117,6 @@ export default function DetectionsPage() {
     const [classBatches, setClassBatches] = useState<
         { label: string; start_rank: number; size: number }[]
     >([]);
-
-    /**
-     * Batches per class for the progress table, keyed by detection_type.
-     * Loaded when a class is expanded: computing boundaries is expensive, so
-     * it is never done for classes nobody opened.
-     */
-    type ClassBatch = { label: string; start_rank: number; size: number; pending?: number };
-    const [expandedClass, setExpandedClass] = useState<string | null>(null);
-    const [batchesByClass, setBatchesByClass] = useState<Record<string, ClassBatch[]>>({});
-    const [loadingBatchesFor, setLoadingBatchesFor] = useState<string | null>(null);
-
-    const toggleClassBatches = useCallback(
-        async (detectionType: string) => {
-            if (expandedClass === detectionType) {
-                setExpandedClass(null);
-                return;
-            }
-            setExpandedClass(detectionType);
-            if (batchesByClass[detectionType]) return;
-
-            setLoadingBatchesFor(detectionType);
-            try {
-                const res = await fetch(
-                    `/api/detection-batches?detection_type=${encodeURIComponent(detectionType)}`
-                );
-                if (!res.ok) throw new Error("batch lookup failed");
-                const data = (await res.json()) as { batches: ClassBatch[] };
-                const batches = data.batches ?? [];
-                setBatchesByClass((prev) => ({ ...prev, [detectionType]: batches }));
-
-                // How much of each batch is still outstanding. Fetched ONE AT A
-                // TIME: each is a fresh count over 5,000 rows, and firing them
-                // together reset the connection.
-                for (const b of batches) {
-                    try {
-                        const r = await fetch(
-                            `/api/submissions?limit=1&offset=0&detection_type=${encodeURIComponent(
-                                detectionType
-                            )}&batch=${b.label}&verification_status=pending`
-                        );
-                        if (!r.ok) continue;
-                        const d = (await r.json()) as { total: number | null };
-                        if (d.total === null || d.total === undefined) continue;
-                        setBatchesByClass((prev) => ({
-                            ...prev,
-                            [detectionType]: (prev[detectionType] ?? []).map((x) =>
-                                x.label === b.label ? { ...x, pending: d.total as number } : x
-                            ),
-                        }));
-                    } catch {
-                        // Leave this batch's count blank rather than failing the row.
-                    }
-                }
-            } catch {
-                setBatchesByClass((prev) => ({ ...prev, [detectionType]: [] }));
-            } finally {
-                setLoadingBatchesFor(null);
-            }
-        },
-        [expandedClass, batchesByClass]
-    );
-
-    /** Open one batch of one class in the review queue. */
-    const openBatch = useCallback((detectionType: string, label: string, done: boolean) => {
-        setViolationType(detectionType);
-        setSelectedBatch(label);
-        setActiveTab(done ? "verified" : "pending");
-        setBatchCount(1);
-    }, []);
 
     // Filters arrive in the URL when the reviewer comes back from a case, so
     // Back lands on the same slice they left. Read from window.location rather
@@ -314,7 +233,7 @@ export default function DetectionsPage() {
                 // Court ready is a subset of verified, not a status of its own.
                 params.set("verification_status", "verified");
                 params.set("review_status", REVIEW_COURT_READY);
-            } else if (activeTab !== "all" && activeTab !== "by_class") {
+            } else if (activeTab !== "all") {
                 params.set("verification_status", activeTab);
             }
             if (searchQuery.trim()) params.set("username", searchQuery.trim());
@@ -389,7 +308,7 @@ export default function DetectionsPage() {
     /** Appending happens when the sentinel below the last card scrolls into view. */
     const sentinelRef = useRef<HTMLDivElement | null>(null);
     useEffect(() => {
-        if (!isHydrated || isLoading || !hasMore || activeTab === "by_class") return;
+        if (!isHydrated || isLoading || !hasMore) return;
         const node = sentinelRef.current;
         if (!node) return;
 
@@ -420,7 +339,6 @@ export default function DetectionsPage() {
         // Wait for the URL-restored filters, or the first render would fetch
         // the unfiltered page and then immediately refetch.
         if (!isHydrated) return;
-        if (activeTab === "by_class") return;
 
         // The debounce exists to keep typing in the search box from firing a
         // request per keystroke. A page already held in the batch cache needs
@@ -685,27 +603,9 @@ export default function DetectionsPage() {
 
     /** The count a class contributes to whichever tab is open. */
     const countForTab = (type: DetectionTypeCount) => {
-        if (activeTab === "verified") return (type.verified ?? 0) + (type.captures ?? 0);
-        if (activeTab === "rejected") return type.rejected ?? 0;
         if (activeTab === "court_ready") return (type.court_ready ?? 0) + (type.captures_court_ready ?? 0);
-        if (activeTab === "pending") return type.pending;
-        return type.total;
+        return (type.verified ?? 0) + (type.captures ?? 0);
     };
-
-    // Most work left first: that is the question the table answers.
-    const classRows = [...detectionTypes].sort((a, b) => b.pending - a.pending);
-    // Captures from Video annotation are validated evidence in a class, so they
-    // count in both its total and its validated figure. They are never pending.
-    const classTotals = classRows.reduce(
-        (acc, c) => ({
-            total: acc.total + c.total + (c.captures ?? 0),
-            pending: acc.pending + c.pending,
-            verified: acc.verified + (c.verified ?? 0) + (c.captures ?? 0),
-            rejected: acc.rejected + (c.rejected ?? 0),
-            court: acc.court + (c.court_ready ?? 0) + (c.captures_court_ready ?? 0),
-        }),
-        { total: 0, pending: 0, verified: 0, rejected: 0, court: 0 }
-    );
 
     // Filtering and paging are done server-side; render exactly what came
     // back, with the Validated tab's captures slotted in by time. A capture
@@ -765,7 +665,7 @@ export default function DetectionsPage() {
             {/* Header matching image */}
             <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4 pt-2">
                 <div>
-                    <h1 className="text-3xl font-extrabold text-[#0F172A] tracking-tight">
+                    <h1 className="text-2xl sm:text-3xl font-extrabold text-[#0F172A] tracking-tight">
                         Violation Review Centre
                     </h1>
                     <p className="text-sm font-medium text-[#64748B] mt-1">
@@ -787,9 +687,11 @@ export default function DetectionsPage() {
             </div>
 
             {/* 4 Stat Cards matching image */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            {/* Two up on a phone: four stacked cards would push the queue off
+                the first screen entirely. */}
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
                 {/* Total evidence */}
-                <div className="bg-white rounded-[20px] border border-[#E2E8F0] p-5 shadow-sm flex items-start justify-between">
+                <div className="bg-white rounded-[20px] border border-[#E2E8F0] p-4 sm:p-5 shadow-sm flex items-start justify-between gap-2">
                     <div>
                         <p className="text-xs font-semibold text-[#64748B]">Total evidence</p>
                         <p className="text-2xl lg:text-3xl font-black text-[#0F172A] tracking-tight mt-1 font-mono tabular-nums">
@@ -799,13 +701,13 @@ export default function DetectionsPage() {
                             AI detections received
                         </p>
                     </div>
-                    <div className="w-10 h-10 rounded-full bg-[#F1F5F9] flex items-center justify-center text-[#475569] shrink-0">
+                    <div className="hidden sm:flex w-10 h-10 rounded-full bg-[#F1F5F9] flex items-center justify-center text-[#475569] shrink-0">
                         <Shield className="w-5 h-5" />
                     </div>
                 </div>
 
                 {/* Pending validation */}
-                <div className="bg-white rounded-[20px] border border-[#E2E8F0] p-5 shadow-sm flex items-start justify-between">
+                <div className="bg-white rounded-[20px] border border-[#E2E8F0] p-4 sm:p-5 shadow-sm flex items-start justify-between gap-2">
                     <div>
                         <p className="text-xs font-semibold text-[#64748B]">Pending validation</p>
                         <p className="text-2xl lg:text-3xl font-black text-[#0F172A] tracking-tight mt-1 font-mono tabular-nums">
@@ -815,13 +717,13 @@ export default function DetectionsPage() {
                             Needs officer review
                         </p>
                     </div>
-                    <div className="w-10 h-10 rounded-full bg-[#FEF3C7] flex items-center justify-center text-[#D97706] shrink-0">
+                    <div className="hidden sm:flex w-10 h-10 rounded-full bg-[#FEF3C7] flex items-center justify-center text-[#D97706] shrink-0">
                         <Clock className="w-5 h-5" />
                     </div>
                 </div>
 
                 {/* Validated */}
-                <div className="bg-white rounded-[20px] border border-[#E2E8F0] p-5 shadow-sm flex items-start justify-between">
+                <div className="bg-white rounded-[20px] border border-[#E2E8F0] p-4 sm:p-5 shadow-sm flex items-start justify-between gap-2">
                     <div>
                         <p className="text-xs font-semibold text-[#64748B]">Validated</p>
                         <p className="text-2xl lg:text-3xl font-black text-[#0F172A] tracking-tight mt-1 font-mono tabular-nums">
@@ -831,13 +733,13 @@ export default function DetectionsPage() {
                             Ready for enforcement
                         </p>
                     </div>
-                    <div className="w-10 h-10 rounded-full bg-[#D1FAE5] flex items-center justify-center text-[#059669] shrink-0">
+                    <div className="hidden sm:flex w-10 h-10 rounded-full bg-[#D1FAE5] flex items-center justify-center text-[#059669] shrink-0">
                         <CheckCircle2 className="w-5 h-5" />
                     </div>
                 </div>
 
                 {/* Dismissed */}
-                <div className="bg-white rounded-[20px] border border-[#E2E8F0] p-5 shadow-sm flex items-start justify-between">
+                <div className="bg-white rounded-[20px] border border-[#E2E8F0] p-4 sm:p-5 shadow-sm flex items-start justify-between gap-2">
                     <div>
                         <p className="text-xs font-semibold text-[#64748B]">Dismissed</p>
                         <p className="text-2xl lg:text-3xl font-black text-[#0F172A] tracking-tight mt-1 font-mono tabular-nums">
@@ -847,7 +749,7 @@ export default function DetectionsPage() {
                             Rejected after review
                         </p>
                     </div>
-                    <div className="w-10 h-10 rounded-full bg-[#F1F5F9] flex items-center justify-center text-[#475569] shrink-0">
+                    <div className="hidden sm:flex w-10 h-10 rounded-full bg-[#F1F5F9] flex items-center justify-center text-[#475569] shrink-0">
                         <XCircle className="w-5 h-5" />
                     </div>
                 </div>
@@ -880,7 +782,7 @@ export default function DetectionsPage() {
                 </div>
 
                 {/* Right Dropdowns matching image */}
-                <div className="flex items-center gap-3">
+                <div className="flex flex-wrap items-center gap-2 sm:gap-3">
                     {/* Violations Dropdown */}
                     <div className="relative">
                         <select
@@ -948,227 +850,11 @@ export default function DetectionsPage() {
                 </div>
             </div>
 
-            {isClassView ? (
-                <div className="bg-white rounded-[22px] border border-[#E2E8F0] shadow-sm overflow-hidden">
-                    <div className="px-5 py-4 border-b border-[#E2E8F0] flex flex-wrap items-baseline justify-between gap-2">
-                        <div>
-                            <h2 className="text-sm font-extrabold text-[#0F172A]">Review progress by class</h2>
-                            <p className="text-[11px] font-medium text-[#64748B] mt-0.5">
-                                Total is the all-time size of a class and does not fall as cases are
-                                reviewed. Remaining is what still needs an officer.
-                            </p>
-                        </div>
-                        <span className="text-[11px] font-bold text-[#64748B] font-mono">
-                            {classTotals.pending.toLocaleString()} of {classTotals.total.toLocaleString()} remaining
-                        </span>
-                    </div>
-
-                    <div className="overflow-x-auto">
-                        <table className="w-full text-left">
-                            <thead className="bg-[#F8FAFC] border-b border-[#E2E8F0]">
-                                <tr>
-                                    {["CLASS", "PROGRESS", "REMAINING", "VALIDATED", "COURT READY", "DISMISSED", "TOTAL"].map(
-                                        (h, i) => (
-                                            <th
-                                                key={h}
-                                                className={cn(
-                                                    "px-5 py-3 text-[10px] font-bold text-[#64748B] uppercase tracking-wider",
-                                                    i > 1 && "text-right"
-                                                )}
-                                            >
-                                                {h}
-                                            </th>
-                                        )
-                                    )}
-                                </tr>
-                            </thead>
-                            <tbody className="divide-y divide-[#F1F5F9]">
-                                {classRows.length === 0 ? (
-                                    <tr>
-                                        <td colSpan={7} className="py-16 text-center text-sm text-[#94A3B8]">
-                                            No detection classes to show.
-                                        </td>
-                                    </tr>
-                                ) : (
-                                    classRows.map((c) => {
-                                        const captures = c.captures ?? 0;
-                                        const rowTotal = c.total + captures;
-                                        const done = rowTotal - c.pending;
-                                        const pct = rowTotal > 0 ? Math.round((done / rowTotal) * 100) : 0;
-                                        const complete = c.pending === 0 && rowTotal > 0;
-
-                                        const splittable = c.total > BATCH_SIZE;
-                                        const isExpanded = expandedClass === c.detection_type;
-                                        const batches = batchesByClass[c.detection_type];
-
-                                        return (
-                                            <React.Fragment key={c.detection_type}>
-                                            <tr
-                                                onClick={() => {
-                                                    // Jump straight into the remaining work for this class.
-                                                    setViolationType(c.detection_type);
-                                                    setSelectedBatch("");
-                                                    setActiveTab(complete ? "verified" : "pending");
-                                                    setBatchCount(1);
-                                                }}
-                                                className="hover:bg-[#F8FAFC] transition-colors cursor-pointer"
-                                            >
-                                                <td className="px-5 py-4">
-                                                    <div className="flex items-center gap-2">
-                                                        {splittable ? (
-                                                            <button
-                                                                onClick={(e) => {
-                                                                    e.stopPropagation();
-                                                                    void toggleClassBatches(c.detection_type);
-                                                                }}
-                                                                aria-label={`Show batches for ${formatDetectionTypeLabel(c.detection_type)}`}
-                                                                className="p-0.5 rounded text-[#94A3B8] hover:text-[#0F172A] hover:bg-[#E2E8F0] transition-colors cursor-pointer shrink-0"
-                                                            >
-                                                                {loadingBatchesFor === c.detection_type ? (
-                                                                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                                                                ) : isExpanded ? (
-                                                                    <ChevronDown className="w-3.5 h-3.5" />
-                                                                ) : (
-                                                                    <ChevronRight className="w-3.5 h-3.5" />
-                                                                )}
-                                                            </button>
-                                                        ) : (
-                                                            <span className="w-4 shrink-0" />
-                                                        )}
-                                                        <span className="text-xs font-bold text-[#0F172A]">
-                                                            {formatDetectionTypeLabel(c.detection_type)}
-                                                        </span>
-                                                        {splittable && (
-                                                            <span className="bg-[#EFF6FF] text-[#1D4ED8] border border-[#BFDBFE] text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1">
-                                                                <Layers className="w-2.5 h-2.5" />
-                                                                {Math.ceil(c.total / BATCH_SIZE)} batches
-                                                            </span>
-                                                        )}
-                                                        {complete && (
-                                                            <span className="bg-[#D1FAE5] text-[#065F46] border border-[#A7F3D0] text-[10px] font-bold px-2 py-0.5 rounded-full">
-                                                                Done
-                                                            </span>
-                                                        )}
-                                                    </div>
-                                                </td>
-                                                <td className="px-5 py-4">
-                                                    <div className="flex items-center gap-2 min-w-[140px]">
-                                                        <div className="flex-1 h-2 rounded-full bg-[#F1F5F9] overflow-hidden">
-                                                            <div
-                                                                className={cn(
-                                                                    "h-full rounded-full",
-                                                                    complete ? "bg-[#00DF89]" : "bg-[#2563EB]"
-                                                                )}
-                                                                style={{ width: `${pct}%` }}
-                                                            />
-                                                        </div>
-                                                        <span className="text-[11px] font-bold text-[#64748B] font-mono w-9 text-right">
-                                                            {pct}%
-                                                        </span>
-                                                    </div>
-                                                </td>
-                                                <td className="px-5 py-4 text-right text-xs font-bold text-[#0F172A] font-mono">
-                                                    {c.pending.toLocaleString()}
-                                                </td>
-                                                <td className="px-5 py-4 text-right text-xs font-bold text-[#059669] font-mono">
-                                                    {((c.verified ?? 0) + captures).toLocaleString()}
-                                                </td>
-                                                <td className="px-5 py-4 text-right text-xs font-bold text-[#1D4ED8] font-mono">
-                                                    {((c.court_ready ?? 0) + (c.captures_court_ready ?? 0)).toLocaleString()}
-                                                </td>
-                                                <td className="px-5 py-4 text-right text-xs font-bold text-[#94A3B8] font-mono">
-                                                    {(c.rejected ?? 0).toLocaleString()}
-                                                </td>
-                                                <td className="px-5 py-4 text-right text-xs font-semibold text-[#64748B] font-mono">
-                                                    {rowTotal.toLocaleString()}
-                                                </td>
-                                            </tr>
-
-                                            {isExpanded && batches && batches.map((b) => {
-                                                const batchDone = b.pending === 0;
-                                                const last = b.start_rank + b.size - 1;
-                                                return (
-                                                    <tr
-                                                        key={`${c.detection_type}-${b.label}`}
-                                                        onClick={() => openBatch(c.detection_type, b.label, batchDone)}
-                                                        className="bg-[#FBFCFE] hover:bg-[#F1F5F9] transition-colors cursor-pointer"
-                                                    >
-                                                        <td className="pl-14 pr-5 py-3">
-                                                            <div className="flex items-center gap-2">
-                                                                <span className="text-xs font-bold text-[#334155]">
-                                                                    Batch {b.label}
-                                                                </span>
-                                                                <span className="text-[11px] font-medium text-[#94A3B8] font-mono">
-                                                                    {b.start_rank.toLocaleString()}&ndash;{last.toLocaleString()}
-                                                                </span>
-                                                                {batchDone && (
-                                                                    <span className="bg-[#D1FAE5] text-[#065F46] border border-[#A7F3D0] text-[10px] font-bold px-2 py-0.5 rounded-full">
-                                                                        Done
-                                                                    </span>
-                                                                )}
-                                                            </div>
-                                                        </td>
-                                                        <td className="px-5 py-3">
-                                                            {b.pending === undefined ? (
-                                                                <span className="text-[11px] text-[#CBD5E1] font-semibold">
-                                                                    counting&hellip;
-                                                                </span>
-                                                            ) : (
-                                                                <div className="flex items-center gap-2 min-w-[140px]">
-                                                                    <div className="flex-1 h-1.5 rounded-full bg-[#F1F5F9] overflow-hidden">
-                                                                        <div
-                                                                            className={cn(
-                                                                                "h-full rounded-full",
-                                                                                batchDone ? "bg-[#00DF89]" : "bg-[#2563EB]"
-                                                                            )}
-                                                                            style={{
-                                                                                width: `${Math.round(((b.size - (b.pending ?? 0)) / b.size) * 100)}%`,
-                                                                            }}
-                                                                        />
-                                                                    </div>
-                                                                    <span className="text-[11px] font-bold text-[#94A3B8] font-mono w-9 text-right">
-                                                                        {Math.round(((b.size - (b.pending ?? 0)) / b.size) * 100)}%
-                                                                    </span>
-                                                                </div>
-                                                            )}
-                                                        </td>
-                                                        <td className="px-5 py-3 text-right text-xs font-bold text-[#0F172A] font-mono">
-                                                            {b.pending === undefined ? "\u2014" : b.pending.toLocaleString()}
-                                                        </td>
-                                                        <td className="px-5 py-3" colSpan={3} />
-                                                        <td className="px-5 py-3 text-right text-xs font-semibold text-[#94A3B8] font-mono">
-                                                            {b.size.toLocaleString()}
-                                                        </td>
-                                                    </tr>
-                                                );
-                                            })}
-
-                                            {isExpanded && batches && batches.length === 0 && (
-                                                <tr className="bg-[#FBFCFE]">
-                                                    <td colSpan={7} className="pl-14 pr-5 py-3 text-[11px] font-semibold text-[#94A3B8]">
-                                                        This class is small enough to review in one go.
-                                                    </td>
-                                                </tr>
-                                            )}
-                                            </React.Fragment>
-                                        );
-                                    })
-                                )}
-                            </tbody>
-                        </table>
-                    </div>
-
-                    <p className="px-5 py-3 border-t border-[#E2E8F0] text-[11px] font-medium text-[#64748B]">
-                        Click a class to open its remaining cases.
-                    </p>
-                </div>
-            ) : (
-            <>
             {/* Evidence Records Counter matching image */}
             <div className="flex items-center justify-between text-xs text-[#64748B] font-semibold px-1">
                 <span>
                     Showing {displaySubmissions.length.toLocaleString()} of{" "}
-                    {displayTotal.toLocaleString()} {activeTab === "pending" ? "pending" : "matching"} records
+                    {displayTotal.toLocaleString()} matching records
                     {selectedBatch && (
                         <span className="text-[#1D4ED8]">
                             {" "}
@@ -1176,7 +862,8 @@ export default function DetectionsPage() {
                         </span>
                     )}
                 </span>
-                <span className="text-[#94A3B8]">Click any frame to review it full screen</span>
+                {/* Desktop wording, and there is no room for it on a phone. */}
+                <span className="hidden sm:inline text-[#94A3B8]">Click any frame to review it full screen</span>
             </div>
 
             {actionError && (
@@ -1214,6 +901,18 @@ export default function DetectionsPage() {
                         if (capture) reviewParams.set(CAPTURE_SOURCE_PARAM, CAPTURE_SOURCE_VALUE);
                         reviewParams.set("id", sub.id);
                         const reviewHref = `/detections/review?${reviewParams.toString()}`;
+
+                        /*
+                         * Every record wears the same card, whether it came from a scout
+                         * or from Video annotation: the class and what it is worth in the
+                         * heading, where and when below it. No scout is named on either,
+                         * so a capture has nothing missing to explain.
+                         */
+                        const countryLabel =
+                            !sub.country_code || sub.country_code === "IN" ? "India" : sub.country_code;
+                        const capturedOn = sub.captured_at
+                            ? new Date(sub.captured_at).toLocaleDateString()
+                            : null;
 
                         return (
                             <div
@@ -1291,39 +990,24 @@ export default function DetectionsPage() {
                                             <h3 className="font-extrabold text-[#0F172A] text-sm tracking-tight capitalize truncate">
                                                 {sub.detection_type?.replace(/_/g, " ") || "Traffic Violation"}
                                             </h3>
-                                            {/* A capture earns nobody beats, so it has no beats pill. */}
-                                            {!capture && (
-                                                <span className="text-[10px] font-mono font-bold text-[#64748B] bg-[#F1F5F9] px-2 py-0.5 rounded">
-                                                    {sub.beats_earned ? `${sub.beats_earned} beats` : "0.20 beats"}
-                                                </span>
-                                            )}
+                                            {/* The record's own value, formatted as the review
+                                                screen formats it, so the two never disagree. */}
+                                            <span className="text-[10px] font-mono font-bold text-[#64748B] bg-[#F1F5F9] px-2 py-0.5 rounded shrink-0">
+                                                {Number(sub.beats_earned ?? 0).toFixed(2)} beats
+                                            </span>
                                         </div>
 
                                         <div className="flex items-center gap-3 text-[11px] text-[#64748B] font-medium mt-1.5 min-w-0">
-                                            {capture ? (
-                                                // Provenance for a capture is the video and the moment
-                                                // in it, the way a case's is its scout and location.
+                                            <span className="flex items-center gap-1 min-w-0">
+                                                <MapPin className="w-3 h-3 text-[#94A3B8] shrink-0" />
+                                                <span className="truncate">{countryLabel}</span>
+                                            </span>
+                                            {capturedOn && (
                                                 <>
-                                                    <span className="flex items-center gap-1 min-w-0">
-                                                        <Film className="w-3 h-3 text-[#94A3B8] shrink-0" />
-                                                        <span className="truncate">{capture.source_name || "Video"}</span>
-                                                    </span>
                                                     <span>•</span>
                                                     <span className="flex items-center gap-1 shrink-0">
-                                                        <Clock className="w-3 h-3 text-[#94A3B8]" />
-                                                        {describeCapturePosition(capture)}
-                                                    </span>
-                                                </>
-                                            ) : (
-                                                <>
-                                                    <span className="flex items-center gap-1">
-                                                        <User className="w-3 h-3 text-[#94A3B8]" />
-                                                        {sub.username || "Scout"}
-                                                    </span>
-                                                    <span>•</span>
-                                                    <span className="flex items-center gap-1">
-                                                        <MapPin className="w-3 h-3 text-[#94A3B8]" />
-                                                        {sub.country_code === "IN" ? "India" : sub.country_code || "IN"}
+                                                        <Calendar className="w-3 h-3 text-[#94A3B8]" />
+                                                        {capturedOn}
                                                     </span>
                                                 </>
                                             )}
@@ -1403,9 +1087,6 @@ export default function DetectionsPage() {
                         );
                     })}
                 </div>
-            )}
-
-            </>
             )}
 
             <CourtReadyDialog

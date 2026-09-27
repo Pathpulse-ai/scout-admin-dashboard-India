@@ -131,7 +131,7 @@ export default function VideoUploadPage() {
             <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4 pt-2">
                 <div>
                     <p className="text-sm font-medium text-[#64748B]">Your workspace</p>
-                    <h1 className="text-3xl font-extrabold text-[#0F172A] tracking-tight mt-1">
+                    <h1 className="text-2xl sm:text-3xl font-extrabold text-[#0F172A] tracking-tight mt-1">
                         Video Library
                     </h1>
                     <p className="text-sm font-medium text-[#64748B] mt-1">
@@ -152,20 +152,20 @@ export default function VideoUploadPage() {
             </div>
 
             {/* Stat Cards */}
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                <div className="bg-white rounded-[20px] border border-[#E2E8F0] p-6 shadow-sm">
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 sm:gap-4">
+                <div className="bg-white rounded-[20px] border border-[#E2E8F0] p-4 sm:p-6 shadow-sm">
                     <p className="text-xs font-semibold text-[#64748B] uppercase tracking-wider">Total videos</p>
                     <p className="text-2xl lg:text-3xl font-black text-[#0F172A] tracking-tight mt-2 tabular-nums">
                         {videos.length.toLocaleString()}
                     </p>
                 </div>
-                <div className="bg-white rounded-[20px] border border-[#E2E8F0] p-6 shadow-sm">
+                <div className="bg-white rounded-[20px] border border-[#E2E8F0] p-4 sm:p-6 shadow-sm">
                     <p className="text-xs font-semibold text-[#64748B] uppercase tracking-wider">Storage</p>
                     <p className="text-2xl lg:text-3xl font-black text-[#0F172A] tracking-tight mt-2 tabular-nums">
                         {formatBytes(totalBytes)}
                     </p>
                 </div>
-                <div className="bg-white rounded-[20px] border border-[#E2E8F0] p-6 shadow-sm">
+                <div className="bg-white rounded-[20px] border border-[#E2E8F0] p-4 sm:p-6 shadow-sm">
                     <p className="text-xs font-semibold text-[#64748B] uppercase tracking-wider">Status</p>
                     <p className="flex items-center gap-2 text-lg font-bold text-[#0F172A] mt-2">
                         <span
