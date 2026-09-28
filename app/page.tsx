@@ -1,41 +1,46 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Lock, Mail, Loader2, ArrowRight } from 'lucide-react';
+import { Lock, Loader2, ArrowRight } from 'lucide-react';
+
+const HOME = '/detections';
+
+/** Where to land after sign-in: the page that bounced us here, if it is ours. */
+function nextDestination(): string {
+    if (typeof window === 'undefined') return HOME;
+    const next = new URLSearchParams(window.location.search).get('next');
+    return next && next.startsWith('/') && !next.startsWith('//') ? next : HOME;
+}
 
 export default function LoginPage() {
-    const [email, setEmail] = useState('admin@pathpulse.com');
-    const [password, setPassword] = useState('admin123');
+    const [password, setPassword] = useState('');
     const [error, setError] = useState('');
     const [isSubmitting, setIsSubmitting] = useState(false);
     const router = useRouter();
-
-    useEffect(() => {
-        if (typeof window !== 'undefined' && localStorage.getItem('pathpulse_auth') === 'true') {
-            router.replace('/detections');
-        }
-    }, [router]);
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
         setError('');
         setIsSubmitting(true);
 
-        setTimeout(() => {
-            if (
-                (email.trim() === 'admin@pathpulse.com' && password === 'admin123') ||
-                (email.trim().length > 3 && password.length >= 4)
-            ) {
-                if (typeof window !== 'undefined') {
-                    localStorage.setItem('pathpulse_auth', 'true');
-                }
-                router.push('/detections');
-            } else {
-                setError('invalid_credentials');
+        try {
+            const res = await fetch('/api/auth/login', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ password }),
+            });
+            if (res.ok) {
+                router.replace(nextDestination());
+                router.refresh();
+                return;
             }
-            setIsSubmitting(false);
-        }, 600);
+            const data = await res.json().catch(() => ({})) as { error?: string };
+            setError(data.error || 'Sign-in failed. Please try again.');
+        } catch {
+            setError('Unable to reach the server. Check the connection and retry.');
+        }
+        setIsSubmitting(false);
     };
 
     return (
@@ -47,7 +52,7 @@ export default function LoginPage() {
                         <Lock className="w-7 h-7" />
                     </div>
                     <h1 className="text-3xl font-extrabold text-foreground tracking-tight">PathPulse Admin</h1>
-                    <p className="mt-2 text-brand-gray font-medium text-sm">Secure access to detection analytics</p>
+                    <p className="mt-2 text-brand-gray font-medium text-sm">Enter the access password to continue</p>
                 </div>
 
                 {/* Login Card */}
@@ -55,38 +60,22 @@ export default function LoginPage() {
                     <form onSubmit={handleSubmit} className="space-y-6">
                         {error && (
                             <div className="p-3.5 rounded-xl bg-danger-background border border-danger/20 text-danger text-sm font-medium animate-in fade-in">
-                                {error === 'invalid_credentials'
-                                    ? 'Invalid email or password. Please try again.'
-                                    : error}
+                                {error}
                             </div>
                         )}
 
                         <div className="space-y-2">
-                            <label className="text-sm font-semibold text-foreground ml-1">Email Address</label>
-                            <div className="relative group">
-                                <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
-                                    <Mail className="h-5 w-5 text-brand-gray group-focus-within:text-brand-green transition-colors" />
-                                </div>
-                                <input
-                                    type="email"
-                                    required
-                                    value={email}
-                                    onChange={(e) => setEmail(e.target.value)}
-                                    className="block w-full pl-11 pr-4 py-3.5 bg-background border border-border-subtle rounded-2xl text-foreground placeholder:text-brand-gray/50 focus:outline-none focus:ring-2 focus:ring-brand-green/20 focus:border-brand-green transition-all"
-                                    placeholder="admin@pathpulse.com"
-                                />
-                            </div>
-                        </div>
-
-                        <div className="space-y-2">
-                            <label className="text-sm font-semibold text-foreground ml-1">Password</label>
+                            <label htmlFor="password" className="text-sm font-semibold text-foreground ml-1">Password</label>
                             <div className="relative group">
                                 <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
                                     <Lock className="h-5 w-5 text-brand-gray group-focus-within:text-brand-green transition-colors" />
                                 </div>
                                 <input
+                                    id="password"
                                     type="password"
                                     required
+                                    autoFocus
+                                    autoComplete="current-password"
                                     value={password}
                                     onChange={(e) => {
                                         setPassword(e.target.value);
@@ -99,26 +88,6 @@ export default function LoginPage() {
                                     }`}
                                     placeholder="••••••••"
                                 />
-                            </div>
-                        </div>
-
-                        <div className="flex items-center justify-between px-1">
-                            <div className="flex items-center">
-                                <input
-                                    id="remember-me"
-                                    name="remember-me"
-                                    type="checkbox"
-                                    defaultChecked
-                                    className="h-4 w-4 text-brand-green focus:ring-brand-green border-border-subtle rounded cursor-pointer transition-colors"
-                                />
-                                <label htmlFor="remember-me" className="ml-2 block text-sm font-medium text-brand-gray cursor-pointer">
-                                    Remember me
-                                </label>
-                            </div>
-                            <div className="text-sm">
-                                <span className="font-semibold text-brand-green hover:underline cursor-pointer">
-                                    Forgot password?
-                                </span>
                             </div>
                         </div>
 
