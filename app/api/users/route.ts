@@ -4,6 +4,42 @@ import { pool } from '@/lib/db';
 const DEFAULT_LIMIT = 25;
 const MAX_LIMIT = 100;
 
+/** A country counts toward the network only once it has more than this many scouts. */
+const ACTIVE_COUNTRY_MIN_SCOUTS = 20;
+
+/**
+ * Network-wide country roll-up, independent of paging and search. Keyed by
+ * country code; scouts stored without one (code 'none') are folded into the
+ * code most scouts with the same country name carry, so e.g. 190 "India"
+ * rows with no code count toward IN rather than as a separate country. The
+ * most common code is used because a few "India" rows carry stray codes
+ * (BA, ME, PR), and picking MIN() would file them all under Bosnia.
+ */
+const COUNTRY_QUERY = `
+  WITH scout AS (
+    SELECT NULLIF(NULLIF(LOWER(TRIM(u.country_code)), ''), 'none') AS code,
+           NULLIF(LOWER(TRIM(u.country)), '') AS name
+    FROM users u
+  ),
+  name_code AS (
+    SELECT name, MODE() WITHIN GROUP (ORDER BY code) AS code
+    FROM scout
+    WHERE code IS NOT NULL AND name IS NOT NULL
+    GROUP BY name
+  ),
+  per_country AS (
+    SELECT COALESCE(s.code, nc.code, s.name) AS country_key,
+           COUNT(*) AS scouts
+    FROM scout s
+    LEFT JOIN name_code nc ON s.code IS NULL AND nc.name = s.name
+    GROUP BY 1
+  )
+  SELECT COUNT(*)::int AS total,
+         COUNT(*) FILTER (WHERE scouts > $1)::int AS active
+  FROM per_country
+  WHERE country_key IS NOT NULL
+`;
+
 function toPositiveInt(raw: string | null, fallback: number, max?: number) {
   const parsed = Number.parseInt(raw ?? '', 10);
   if (!Number.isFinite(parsed) || parsed < 0) return fallback;
@@ -152,9 +188,10 @@ export async function GET(request: NextRequest) {
       countParams = [];
     }
 
-    const [pageResult, countResult] = await Promise.all([
+    const [pageResult, countResult, countryResult] = await Promise.all([
       pool.query(pageQuery, pageParams),
       pool.query(countQuery, countParams),
+      pool.query(COUNTRY_QUERY, [ACTIVE_COUNTRY_MIN_SCOUTS]),
     ]);
 
     const total = countResult.rows[0]?.total ?? 0;
@@ -165,6 +202,11 @@ export async function GET(request: NextRequest) {
       limit,
       offset,
       has_more: offset + pageResult.rows.length < total,
+      countries: {
+        active: countryResult.rows[0]?.active ?? 0,
+        total: countryResult.rows[0]?.total ?? 0,
+        min_scouts: ACTIVE_COUNTRY_MIN_SCOUTS,
+      },
     });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : 'Server error';

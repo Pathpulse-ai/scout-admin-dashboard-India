@@ -53,6 +53,13 @@ const SKELETON_ROWS = Array.from({ length: 10 }, (_, i) => i);
 
 const PAGE_SIZE = 25;
 
+/** Network-wide country roll-up returned alongside every page of users. */
+interface CountryStats {
+    active: number;
+    total: number;
+    min_scouts: number;
+}
+
 /** Stable 32-bit hash so a scout's displayed figures never change between renders. */
 function hashUserId(id: string): number {
     let hash = 2166136261;
@@ -239,6 +246,7 @@ export default function UserQueryPage() {
     const [modalCopied, setModalCopied] = useState(false);
     const [page, setPage] = useState(1);
     const [total, setTotal] = useState(0);
+    const [countryStats, setCountryStats] = useState<CountryStats | null>(null);
 
     const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
     const rangeStart = total === 0 ? 0 : (page - 1) * PAGE_SIZE + 1;
@@ -259,9 +267,10 @@ export default function UserQueryPage() {
             if (!res.ok) {
                 throw new Error(`Request failed with status ${res.status}`);
             }
-            const data = await res.json() as { users?: UserRecord[]; total?: number };
+            const data = await res.json() as { users?: UserRecord[]; total?: number; countries?: CountryStats };
             setUsers(data.users ?? []);
             setTotal(data.total ?? 0);
+            if (data.countries) setCountryStats(data.countries);
         } catch {
             setUsers([]);
             setTotal(0);
@@ -290,10 +299,7 @@ export default function UserQueryPage() {
             },
             { android: 0, ios: 0 }
         );
-        const countries = new Set(
-            users.map((u) => (u.country_code || u.country || "").trim().toLowerCase()).filter(Boolean)
-        ).size;
-        return { beats, platforms, countries };
+        return { beats, platforms };
     }, [users]);
 
     const goToPage = (next: number) => {
@@ -399,9 +405,19 @@ export default function UserQueryPage() {
                                 {pageTotals.platforms.android}/{pageTotals.platforms.ios}
                             </p>
                         )}
-                        <p className="text-[11px] text-[#64748B] mt-0.5">
-                            Android / iOS • {pageTotals.countries}{" "}
-                            {pageTotals.countries === 1 ? "country" : "countries"}
+                        <p
+                            className="text-[11px] text-[#64748B] mt-0.5"
+                            title={countryStats
+                                ? `${countryStats.active} countries with more than ${countryStats.min_scouts} scouts (${countryStats.total} countries in total)`
+                                : undefined}
+                        >
+                            Android / iOS
+                            {countryStats && (
+                                <>
+                                    {" "}• {countryStats.active}{" "}
+                                    {countryStats.active === 1 ? "country" : "countries"}
+                                </>
+                            )}
                         </p>
                     </div>
                     <div className="w-10 h-10 rounded-full bg-[#F1F5F9] flex items-center justify-center text-[#475569]">

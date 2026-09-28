@@ -18,12 +18,10 @@ export default function SettingsPage() {
         setTimeout(() => setSavedNotification(false), 2500);
     };
 
-    const handleSignOut = () => {
-        if (typeof window !== "undefined") {
-            localStorage.removeItem("pathpulse_auth");
-            localStorage.removeItem("pathpulse_user");
-        }
-        router.push("/");
+    const handleSignOut = async () => {
+        await fetch("/api/auth/logout", { method: "POST" }).catch(() => undefined);
+        router.replace("/");
+        router.refresh();
     };
 
     return (
