@@ -7,7 +7,7 @@ import {
     ArrowLeft,
     ArrowRight,
     Check,
-    Clock,
+    Calendar,
     Film,
     Gavel,
     ImageOff,
@@ -15,7 +15,6 @@ import {
     Loader2,
     MapPin,
     TriangleAlert,
-    User,
     X,
 } from "lucide-react";
 import { Submission, VerificationStatus } from "@/types";
@@ -903,51 +902,34 @@ export default function ReviewClient() {
 
             {/* Case record */}
             <div className="bg-white rounded-[22px] border border-[#E2E8F0] shadow-sm p-5 space-y-4">
+                {/* The same summary for every record, from a scout or from Video
+                    annotation alike. The console covers India, so that is the region
+                    named here; the coordinates below stay empty when none were
+                    recorded rather than claim a place. */}
                 <div className="flex items-center gap-4 text-[11px] font-semibold text-[#64748B] min-w-0">
-                    {capture ? (
-                        // Provenance for a capture is the video and the moment in
-                        // it, the way a case's is its scout and location.
-                        <>
-                            <span className="flex items-center gap-1.5 min-w-0">
-                                <Film className="w-3.5 h-3.5 text-[#94A3B8] shrink-0" />
-                                <span className="truncate">{capture.source_name || "Video"}</span>
-                            </span>
-                            <span className="flex items-center gap-1.5 shrink-0">
-                                <Clock className="w-3.5 h-3.5 text-[#94A3B8]" />
-                                {describeCapturePosition(capture)}
-                            </span>
-                        </>
-                    ) : (
-                        <>
-                            <span className="flex items-center gap-1.5">
-                                <User className="w-3.5 h-3.5 text-[#94A3B8]" />
-                                {current?.username || "Unknown scout"}
-                            </span>
-                            <span className="flex items-center gap-1.5">
-                                <MapPin className="w-3.5 h-3.5 text-[#94A3B8]" />
-                                {current?.country_code || "Region not recorded"}
-                            </span>
-                        </>
-                    )}
+                    <span className="flex items-center gap-1.5">
+                        <MapPin className="w-3.5 h-3.5 text-[#94A3B8]" />
+                        {!current?.country_code || current.country_code === "IN" ? "India" : current.country_code}
+                    </span>
+                    <span className="flex items-center gap-1.5">
+                        <Calendar className="w-3.5 h-3.5 text-[#94A3B8]" />
+                        {formatDateTime(current?.captured_at) ?? "Not recorded"}
+                    </span>
                 </div>
 
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-4 pt-1 border-t border-[#F1F5F9]">
                     <Field label="Violation type" value={current ? formatDetectionTypeLabel(current.detection_type) : null} />
                     <Field label="Status" value={current?.verification_status} />
-                    {capture ? (
+                    <Field
+                        label="Beats earned"
+                        value={current ? `${Number(current.beats_earned ?? 0).toFixed(2)} PTS` : null}
+                    />
+                    <Field label="Frames" value={current?.images?.length ?? null} />
+                    {capture && (
                         <>
                             <Field label="Source video" value={capture.source_name} />
                             <Field label="Position in video" value={describeCapturePosition(capture)} />
-                            <Field label="Scout" value={current?.username || null} />
                             <Field label="Size" value={formatBytes(capture.byte_size)} />
-                        </>
-                    ) : (
-                        <>
-                            <Field
-                                label="Beats earned"
-                                value={current ? `${Number(current.beats_earned ?? 0).toFixed(2)} PTS` : null}
-                            />
-                            <Field label="Frames" value={current?.images?.length ?? null} />
                         </>
                     )}
                     <Field label="Latitude" value={current?.latitude ?? null} />
@@ -957,7 +939,7 @@ export default function ReviewClient() {
                     {current?.verification_status === "verified" && (
                         <Field label="Validated at" value={formatDateTime(current?.verified_at)} />
                     )}
-                    {current?.verification_status === "verified" && !capture && (
+                    {current?.verification_status === "verified" && (
                         <Field
                             label="Court ready"
                             value={

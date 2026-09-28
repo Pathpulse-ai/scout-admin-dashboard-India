@@ -780,7 +780,7 @@ export default function VideoAnnotationPage() {
             {/* Header */}
             <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4 pt-2">
                 <div>
-                    <h1 className="text-3xl font-extrabold text-[#0F172A] tracking-tight">Video annotation</h1>
+                    <h1 className="text-2xl sm:text-3xl font-extrabold text-[#0F172A] tracking-tight">Video annotation</h1>
                     <p className="text-sm font-medium text-[#64748B] mt-1">
                         Play a video, capture the frame or clip that shows a violation, and file it as a validated image.
                     </p>
@@ -825,7 +825,9 @@ export default function VideoAnnotationPage() {
 
             <div className="grid grid-cols-1 lg:grid-cols-[300px_1fr] gap-5 items-start">
                 {/* Video list */}
-                <aside className="bg-white rounded-[22px] border border-[#E2E8F0] shadow-sm overflow-hidden">
+                {/* On a phone the player comes first; the list of videos is a
+                    way to change what you are watching, not the point of the page. */}
+                <aside className="order-2 lg:order-1 bg-white rounded-[22px] border border-[#E2E8F0] shadow-sm overflow-hidden">
                     <div className="px-4 py-3 border-b border-[#E2E8F0]">
                         <h2 className="text-xs font-bold text-[#0F172A] uppercase tracking-wider">Videos</h2>
                     </div>
@@ -842,7 +844,7 @@ export default function VideoAnnotationPage() {
                             </Link>
                         </div>
                     ) : (
-                        <ul className="divide-y divide-[#F1F5F9] max-h-[70vh] overflow-y-auto">
+                        <ul className="divide-y divide-[#F1F5F9] max-h-[40vh] lg:max-h-[70vh] overflow-y-auto">
                             {libraryVideos.length > 0 && (
                                 <li className="px-4 py-2 text-[10px] font-bold text-[#94A3B8] uppercase tracking-wider bg-[#F8FAFC]">
                                     Uploaded
@@ -884,7 +886,7 @@ export default function VideoAnnotationPage() {
                 </aside>
 
                 {/* Player + saved captures */}
-                <div className="space-y-5 min-w-0">
+                <div className="order-1 lg:order-2 space-y-5 min-w-0">
                     <div
                         ref={stageRef}
                         className={cn(

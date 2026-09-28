@@ -34,18 +34,18 @@ const navigationItems = [
         icon: Scan,
         href: "/detections",
     },
-    {
-        id: "video-upload",
-        label: "Video upload",
-        icon: Upload,
-        href: "/video-upload",
-    },
-    {
-        id: "video-annotation",
-        label: "Video annotation",
-        icon: Clapperboard,
-        href: "/video-annotation",
-    },
+    // {
+    //     id: "video-upload",
+    //     label: "Video upload",
+    //     icon: Upload,
+    //     href: "/video-upload",
+    // },
+    // {
+    //     id: "video-annotation",
+    //     label: "Video annotation",
+    //     icon: Clapperboard,
+    //     href: "/video-annotation",
+    // },
 ];
 
 const BrandMark = ({ className }: { className?: string }) => (

@@ -73,7 +73,12 @@ export const EMPTY_FILTERS: DetectionFilters = {
     batch: '',
 };
 
-const TABS: ReviewTab[] = ['all', 'pending', 'verified', 'rejected', 'court_ready', 'by_class'];
+/**
+ * The tabs the review centre offers. Only these are accepted from a URL, so
+ * a stale link to a tab that was removed lands on Validated rather than on a
+ * view that is no longer rendered.
+ */
+const TABS: ReviewTab[] = ['verified', 'court_ready'];
 
 export const REVIEW_COURT_READY = 'COURT_READY';
 const RANGES: ReviewRange[] = ['all', 'today', 'week', 'month'];
@@ -142,10 +147,7 @@ export function parseFilters(search: URLSearchParams): DetectionFilters {
     const rawTab = search.get('tab') as ReviewTab | null;
     const rawRange = search.get('range') as ReviewRange | null;
 
-    // 'pending' is the default because the grid no longer offers an
-    // "All cases" tab; falling back to 'all' would select a tab that is not
-    // rendered, leaving nothing highlighted.
-    const tab = rawTab && TABS.includes(rawTab) ? rawTab : 'pending';
+    const tab = rawTab && TABS.includes(rawTab) ? rawTab : 'verified';
     const range = rawRange && RANGES.includes(rawRange) ? rawRange : 'all';
 
     // An arbitrary `from` reaches Postgres as $n::date, where a malformed value
