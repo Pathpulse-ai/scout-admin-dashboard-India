@@ -19,16 +19,27 @@ import {
     Maximize2,
     Film,
     ImageOff,
-    Gavel
+    Gavel,
+    ChevronRight,
+    Layers
 } from "lucide-react";
 import { Submission, Stats, DetectionTypeCount, VerificationStatus } from "@/types";
 import { cn } from "@/lib/utils";
 import CourtReadyDialog from "@/components/detections/CourtReadyDialog";
 import {
+    CAPTURE_SOURCE_PARAM,
+    CAPTURE_SOURCE_VALUE,
+    VideoAnnotationItem,
+    captureToSubmission,
+    describeCapturePosition,
+    mergeCapturesByTime,
+} from "@/lib/captures";
+import {
     DetectionFilters,
     ReviewRange,
     ReviewTab,
     parseFilters,
+    BATCH_SIZE,
     GRID_BATCH_SIZE,
     REVIEW_COURT_READY,
     batchIndexFor,
@@ -118,6 +129,75 @@ export default function DetectionsPage() {
     const [classBatches, setClassBatches] = useState<
         { label: string; start_rank: number; size: number }[]
     >([]);
+
+    /**
+     * Batches per class for the progress table, keyed by detection_type.
+     * Loaded when a class is expanded: computing boundaries is expensive, so
+     * it is never done for classes nobody opened.
+     */
+    type ClassBatch = { label: string; start_rank: number; size: number; pending?: number };
+    const [expandedClass, setExpandedClass] = useState<string | null>(null);
+    const [batchesByClass, setBatchesByClass] = useState<Record<string, ClassBatch[]>>({});
+    const [loadingBatchesFor, setLoadingBatchesFor] = useState<string | null>(null);
+
+    const toggleClassBatches = useCallback(
+        async (detectionType: string) => {
+            if (expandedClass === detectionType) {
+                setExpandedClass(null);
+                return;
+            }
+            setExpandedClass(detectionType);
+            if (batchesByClass[detectionType]) return;
+
+            setLoadingBatchesFor(detectionType);
+            try {
+                const res = await fetch(
+                    `/api/detection-batches?detection_type=${encodeURIComponent(detectionType)}`
+                );
+                if (!res.ok) throw new Error("batch lookup failed");
+                const data = (await res.json()) as { batches: ClassBatch[] };
+                const batches = data.batches ?? [];
+                setBatchesByClass((prev) => ({ ...prev, [detectionType]: batches }));
+
+                // How much of each batch is still outstanding. Fetched ONE AT A
+                // TIME: each is a fresh count over 5,000 rows, and firing them
+                // together reset the connection.
+                for (const b of batches) {
+                    try {
+                        const r = await fetch(
+                            `/api/submissions?limit=1&offset=0&detection_type=${encodeURIComponent(
+                                detectionType
+                            )}&batch=${b.label}&verification_status=pending`
+                        );
+                        if (!r.ok) continue;
+                        const d = (await r.json()) as { total: number | null };
+                        if (d.total === null || d.total === undefined) continue;
+                        setBatchesByClass((prev) => ({
+                            ...prev,
+                            [detectionType]: (prev[detectionType] ?? []).map((x) =>
+                                x.label === b.label ? { ...x, pending: d.total as number } : x
+                            ),
+                        }));
+                    } catch {
+                        // Leave this batch's count blank rather than failing the row.
+                    }
+                }
+            } catch {
+                setBatchesByClass((prev) => ({ ...prev, [detectionType]: [] }));
+            } finally {
+                setLoadingBatchesFor(null);
+            }
+        },
+        [expandedClass, batchesByClass]
+    );
+
+    /** Open one batch of one class in the review queue. */
+    const openBatch = useCallback((detectionType: string, label: string, done: boolean) => {
+        setViolationType(detectionType);
+        setSelectedBatch(label);
+        setActiveTab(done ? "verified" : "pending");
+        setBatchCount(1);
+    }, []);
 
     // Filters arrive in the URL when the reviewer comes back from a case, so
     // Back lands on the same slice they left. Read from window.location rather
@@ -385,6 +465,79 @@ export default function DetectionsPage() {
     /** Mirrors the in-flight gate for rendering; the ref cannot be read here. */
     const [savingId, setSavingId] = useState<string | null>(null);
 
+    /**
+     * Frames and clips captured on the Video annotation page. They are
+     * validated evidence from the moment they are saved, so the Validated tab
+     * shows them in the same grid, with the same card, as every other
+     * validated image or video. They are not submissions, so they come from
+     * their own endpoint (under the same class and time filters) and are
+     * merged into the list by time.
+     */
+    const [captures, setCaptures] = useState<Submission[]>([]);
+
+    useEffect(() => {
+        if (!isHydrated || (activeTab !== "verified" && activeTab !== "court_ready")) {
+            setCaptures([]);
+            return;
+        }
+        let cancelled = false;
+        (async () => {
+            try {
+                const params = new URLSearchParams({ limit: "500" });
+                // Court ready is a subset of validated, for captures as for cases.
+                if (activeTab === "court_ready") params.set("review_status", REVIEW_COURT_READY);
+                if (violationType) params.set("detection_type", violationType);
+                const from = resolveDateFrom(timeRange as ReviewRange);
+                if (from) params.set("date_from", from);
+                const res = await fetch(`/api/annotations?${params.toString()}`);
+                if (!res.ok) throw new Error("annotations failed");
+                const data = (await res.json()) as { annotations: VideoAnnotationItem[] };
+                if (!cancelled) setCaptures((data.annotations ?? []).map(captureToSubmission));
+            } catch {
+                if (!cancelled) setCaptures([]);
+            }
+        })();
+        return () => {
+            cancelled = true;
+        };
+    }, [isHydrated, activeTab, violationType, timeRange]);
+
+    /**
+     * Dismissing a capture removes it: unlike a scout case it has no pending
+     * or dismissed state to fall back to, so the officer is asked first.
+     */
+    const removeCapture = async (sub: Submission, e?: React.MouseEvent) => {
+        e?.preventDefault();
+        e?.stopPropagation();
+        if (!sub.capture || actingRef.current === sub.id) return;
+        if (!window.confirm("Remove this capture from validated evidence? This cannot be undone.")) return;
+
+        actingRef.current = sub.id;
+        setSavingId(sub.id);
+        setActionError(null);
+        try {
+            const res = await fetch(`/api/annotations/${sub.id}`, { method: "DELETE" });
+            if (!res.ok) throw new Error(`Remove failed (HTTP ${res.status})`);
+            setCaptures((prev) => prev.filter((c) => c.id !== sub.id));
+            setStats((prev) => ({
+                ...prev,
+                validated_captures: Math.max(0, (prev.validated_captures ?? 0) - 1),
+            }));
+            setDetectionTypes((prev) =>
+                prev.map((t) =>
+                    t.detection_type === sub.detection_type
+                        ? { ...t, captures: Math.max(0, (t.captures ?? 0) - 1) }
+                        : t
+                )
+            );
+        } catch (err) {
+            setActionError((err as Error)?.message ?? "Could not remove the capture.");
+        } finally {
+            actingRef.current = null;
+            setSavingId(null);
+        }
+    };
+
     const applyDecision = async (
         sub: Submission,
         status: Exclude<VerificationStatus, "pending">,
@@ -447,6 +600,79 @@ export default function DetectionsPage() {
         }
     };
 
+    /**
+     * File a validated record as court ready, or take that back.
+     *
+     * A scout case and a capture are recorded on the same table but through
+     * different endpoints, because only a case has a verification status to
+     * carry along with it.
+     */
+    const setCourtReady = async (sub: Submission, next: boolean, e?: React.MouseEvent) => {
+        // The media block is a link, so a button inside the card must cancel
+        // the navigation as well as the bubble.
+        e?.preventDefault();
+        e?.stopPropagation();
+
+        if (actingRef.current === sub.id) return;
+        actingRef.current = sub.id;
+        setSavingId(sub.id);
+        setActionError(null);
+
+        const isCapture = Boolean(sub.capture);
+        try {
+            const res = await fetch(
+                isCapture ? `/api/annotations/${sub.id}` : `/api/submissions/${sub.id}/verify`,
+                {
+                    method: "PATCH",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(
+                        isCapture ? { court_ready: next } : { status: "verified", court_ready: next }
+                    ),
+                }
+            );
+            if (!res.ok) {
+                const detail = (await res.json().catch(() => null)) as { error?: string } | null;
+                throw new Error(detail?.error ?? `Update failed (HTTP ${res.status})`);
+            }
+            const saved = (await res.json()) as {
+                review_status?: string | null;
+                annotation?: { review_status: string | null };
+            };
+            const reviewStatus = isCapture ? saved.annotation?.review_status ?? null : saved.review_status ?? null;
+            const isCourt = reviewStatus === REVIEW_COURT_READY;
+
+            // Taking it back drops the record out of the Court ready tab.
+            const leavesTab = activeTab === "court_ready" && !isCourt;
+            const update = (rows: Submission[]) =>
+                leavesTab
+                    ? rows.filter((s) => s.id !== sub.id)
+                    : rows.map((s) =>
+                          s.id === sub.id
+                              ? { ...s, review_status: reviewStatus, court_ready: isCourt }
+                              : s
+                      );
+            if (isCapture) setCaptures(update);
+            else {
+                setSubmissions(update);
+                if (leavesTab) setTotal((t) => Math.max(0, t - 1));
+            }
+
+            setDetectionTypes((prev) =>
+                prev.map((t) => {
+                    if (t.detection_type !== sub.detection_type) return t;
+                    const key = isCapture ? "captures_court_ready" : "court_ready";
+                    const current = (isCapture ? t.captures_court_ready : t.court_ready) ?? 0;
+                    return { ...t, [key]: Math.max(0, current + (next ? 1 : -1)) };
+                })
+            );
+        } catch (err) {
+            setActionError((err as Error)?.message ?? "Could not file this decision.");
+        } finally {
+            actingRef.current = null;
+            setSavingId(null);
+        }
+    };
+
     const handleVerify = (sub: Submission, e?: React.MouseEvent) => {
         // The media block is a link, so the button must cancel navigation too.
         e?.preventDefault();
@@ -459,28 +685,40 @@ export default function DetectionsPage() {
 
     /** The count a class contributes to whichever tab is open. */
     const countForTab = (type: DetectionTypeCount) => {
-        if (activeTab === "verified") return type.verified ?? 0;
+        if (activeTab === "verified") return (type.verified ?? 0) + (type.captures ?? 0);
         if (activeTab === "rejected") return type.rejected ?? 0;
-        if (activeTab === "court_ready") return type.court_ready ?? 0;
+        if (activeTab === "court_ready") return (type.court_ready ?? 0) + (type.captures_court_ready ?? 0);
         if (activeTab === "pending") return type.pending;
         return type.total;
     };
 
     // Most work left first: that is the question the table answers.
     const classRows = [...detectionTypes].sort((a, b) => b.pending - a.pending);
+    // Captures from Video annotation are validated evidence in a class, so they
+    // count in both its total and its validated figure. They are never pending.
     const classTotals = classRows.reduce(
         (acc, c) => ({
-            total: acc.total + c.total,
+            total: acc.total + c.total + (c.captures ?? 0),
             pending: acc.pending + c.pending,
-            verified: acc.verified + (c.verified ?? 0),
+            verified: acc.verified + (c.verified ?? 0) + (c.captures ?? 0),
             rejected: acc.rejected + (c.rejected ?? 0),
-            court: acc.court + (c.court_ready ?? 0),
+            court: acc.court + (c.court_ready ?? 0) + (c.captures_court_ready ?? 0),
         }),
         { total: 0, pending: 0, verified: 0, rejected: 0, court: 0 }
     );
 
-    // Filtering and paging are done server-side; render exactly what came back.
-    const displaySubmissions = submissions;
+    // Filtering and paging are done server-side; render exactly what came
+    // back, with the Validated tab's captures slotted in by time. A capture
+    // carries no queue index: the review page opens it on its own.
+    const displaySubmissions =
+        activeTab === "verified" && captures.length > 0
+            ? mergeCapturesByTime(submissions, captures, hasMore)
+            : submissions;
+    const seqIndexById = new Map(submissions.map((s, i) => [s.id, i] as const));
+    // Captures walk a sequence of their own on the review page, in exactly
+    // this order, so a card hands over its position among the captures.
+    const captureIndexById = new Map(captures.map((c, i) => [c.id, i] as const));
+    const displayTotal = total + (activeTab === "verified" ? captures.length : 0);
 
     // Exactly the filter set the API call used, handed to the review page so it
     // walks the same ordered sequence.
@@ -587,7 +825,7 @@ export default function DetectionsPage() {
                     <div>
                         <p className="text-xs font-semibold text-[#64748B]">Validated</p>
                         <p className="text-2xl lg:text-3xl font-black text-[#0F172A] tracking-tight mt-1 font-mono tabular-nums">
-                            {stats.verified.toLocaleString()}
+                            {(stats.verified + (stats.validated_captures ?? 0)).toLocaleString()}
                         </p>
                         <p className="text-[11px] font-medium text-[#94A3B8] mt-1.5">
                             Ready for enforcement
@@ -753,16 +991,23 @@ export default function DetectionsPage() {
                                     </tr>
                                 ) : (
                                     classRows.map((c) => {
-                                        const done = c.total - c.pending;
-                                        const pct = c.total > 0 ? Math.round((done / c.total) * 100) : 0;
-                                        const complete = c.pending === 0 && c.total > 0;
+                                        const captures = c.captures ?? 0;
+                                        const rowTotal = c.total + captures;
+                                        const done = rowTotal - c.pending;
+                                        const pct = rowTotal > 0 ? Math.round((done / rowTotal) * 100) : 0;
+                                        const complete = c.pending === 0 && rowTotal > 0;
+
+                                        const splittable = c.total > BATCH_SIZE;
+                                        const isExpanded = expandedClass === c.detection_type;
+                                        const batches = batchesByClass[c.detection_type];
 
                                         return (
+                                            <React.Fragment key={c.detection_type}>
                                             <tr
-                                                key={c.detection_type}
                                                 onClick={() => {
                                                     // Jump straight into the remaining work for this class.
                                                     setViolationType(c.detection_type);
+                                                    setSelectedBatch("");
                                                     setActiveTab(complete ? "verified" : "pending");
                                                     setBatchCount(1);
                                                 }}
@@ -770,9 +1015,35 @@ export default function DetectionsPage() {
                                             >
                                                 <td className="px-5 py-4">
                                                     <div className="flex items-center gap-2">
+                                                        {splittable ? (
+                                                            <button
+                                                                onClick={(e) => {
+                                                                    e.stopPropagation();
+                                                                    void toggleClassBatches(c.detection_type);
+                                                                }}
+                                                                aria-label={`Show batches for ${formatDetectionTypeLabel(c.detection_type)}`}
+                                                                className="p-0.5 rounded text-[#94A3B8] hover:text-[#0F172A] hover:bg-[#E2E8F0] transition-colors cursor-pointer shrink-0"
+                                                            >
+                                                                {loadingBatchesFor === c.detection_type ? (
+                                                                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                                                ) : isExpanded ? (
+                                                                    <ChevronDown className="w-3.5 h-3.5" />
+                                                                ) : (
+                                                                    <ChevronRight className="w-3.5 h-3.5" />
+                                                                )}
+                                                            </button>
+                                                        ) : (
+                                                            <span className="w-4 shrink-0" />
+                                                        )}
                                                         <span className="text-xs font-bold text-[#0F172A]">
                                                             {formatDetectionTypeLabel(c.detection_type)}
                                                         </span>
+                                                        {splittable && (
+                                                            <span className="bg-[#EFF6FF] text-[#1D4ED8] border border-[#BFDBFE] text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1">
+                                                                <Layers className="w-2.5 h-2.5" />
+                                                                {Math.ceil(c.total / BATCH_SIZE)} batches
+                                                            </span>
+                                                        )}
                                                         {complete && (
                                                             <span className="bg-[#D1FAE5] text-[#065F46] border border-[#A7F3D0] text-[10px] font-bold px-2 py-0.5 rounded-full">
                                                                 Done
@@ -800,18 +1071,86 @@ export default function DetectionsPage() {
                                                     {c.pending.toLocaleString()}
                                                 </td>
                                                 <td className="px-5 py-4 text-right text-xs font-bold text-[#059669] font-mono">
-                                                    {(c.verified ?? 0).toLocaleString()}
+                                                    {((c.verified ?? 0) + captures).toLocaleString()}
                                                 </td>
                                                 <td className="px-5 py-4 text-right text-xs font-bold text-[#1D4ED8] font-mono">
-                                                    {(c.court_ready ?? 0).toLocaleString()}
+                                                    {((c.court_ready ?? 0) + (c.captures_court_ready ?? 0)).toLocaleString()}
                                                 </td>
                                                 <td className="px-5 py-4 text-right text-xs font-bold text-[#94A3B8] font-mono">
                                                     {(c.rejected ?? 0).toLocaleString()}
                                                 </td>
                                                 <td className="px-5 py-4 text-right text-xs font-semibold text-[#64748B] font-mono">
-                                                    {c.total.toLocaleString()}
+                                                    {rowTotal.toLocaleString()}
                                                 </td>
                                             </tr>
+
+                                            {isExpanded && batches && batches.map((b) => {
+                                                const batchDone = b.pending === 0;
+                                                const last = b.start_rank + b.size - 1;
+                                                return (
+                                                    <tr
+                                                        key={`${c.detection_type}-${b.label}`}
+                                                        onClick={() => openBatch(c.detection_type, b.label, batchDone)}
+                                                        className="bg-[#FBFCFE] hover:bg-[#F1F5F9] transition-colors cursor-pointer"
+                                                    >
+                                                        <td className="pl-14 pr-5 py-3">
+                                                            <div className="flex items-center gap-2">
+                                                                <span className="text-xs font-bold text-[#334155]">
+                                                                    Batch {b.label}
+                                                                </span>
+                                                                <span className="text-[11px] font-medium text-[#94A3B8] font-mono">
+                                                                    {b.start_rank.toLocaleString()}&ndash;{last.toLocaleString()}
+                                                                </span>
+                                                                {batchDone && (
+                                                                    <span className="bg-[#D1FAE5] text-[#065F46] border border-[#A7F3D0] text-[10px] font-bold px-2 py-0.5 rounded-full">
+                                                                        Done
+                                                                    </span>
+                                                                )}
+                                                            </div>
+                                                        </td>
+                                                        <td className="px-5 py-3">
+                                                            {b.pending === undefined ? (
+                                                                <span className="text-[11px] text-[#CBD5E1] font-semibold">
+                                                                    counting&hellip;
+                                                                </span>
+                                                            ) : (
+                                                                <div className="flex items-center gap-2 min-w-[140px]">
+                                                                    <div className="flex-1 h-1.5 rounded-full bg-[#F1F5F9] overflow-hidden">
+                                                                        <div
+                                                                            className={cn(
+                                                                                "h-full rounded-full",
+                                                                                batchDone ? "bg-[#00DF89]" : "bg-[#2563EB]"
+                                                                            )}
+                                                                            style={{
+                                                                                width: `${Math.round(((b.size - (b.pending ?? 0)) / b.size) * 100)}%`,
+                                                                            }}
+                                                                        />
+                                                                    </div>
+                                                                    <span className="text-[11px] font-bold text-[#94A3B8] font-mono w-9 text-right">
+                                                                        {Math.round(((b.size - (b.pending ?? 0)) / b.size) * 100)}%
+                                                                    </span>
+                                                                </div>
+                                                            )}
+                                                        </td>
+                                                        <td className="px-5 py-3 text-right text-xs font-bold text-[#0F172A] font-mono">
+                                                            {b.pending === undefined ? "\u2014" : b.pending.toLocaleString()}
+                                                        </td>
+                                                        <td className="px-5 py-3" colSpan={3} />
+                                                        <td className="px-5 py-3 text-right text-xs font-semibold text-[#94A3B8] font-mono">
+                                                            {b.size.toLocaleString()}
+                                                        </td>
+                                                    </tr>
+                                                );
+                                            })}
+
+                                            {isExpanded && batches && batches.length === 0 && (
+                                                <tr className="bg-[#FBFCFE]">
+                                                    <td colSpan={7} className="pl-14 pr-5 py-3 text-[11px] font-semibold text-[#94A3B8]">
+                                                        This class is small enough to review in one go.
+                                                    </td>
+                                                </tr>
+                                            )}
+                                            </React.Fragment>
                                         );
                                     })
                                 )}
@@ -829,7 +1168,7 @@ export default function DetectionsPage() {
             <div className="flex items-center justify-between text-xs text-[#64748B] font-semibold px-1">
                 <span>
                     Showing {displaySubmissions.length.toLocaleString()} of{" "}
-                    {total.toLocaleString()} {activeTab === "pending" ? "pending" : "matching"} records
+                    {displayTotal.toLocaleString()} {activeTab === "pending" ? "pending" : "matching"} records
                     {selectedBatch && (
                         <span className="text-[#1D4ED8]">
                             {" "}
@@ -863,7 +1202,16 @@ export default function DetectionsPage() {
                         const imgUrl = primaryImg?.image_url;
                         const videoUrl = sub.video_asset?.url;
                         const caseId = formatCaseId(sub.id, idx);
-                        const reviewParams = toReviewParams(gridFilters, idx, total);
+                        const capture = sub.capture ?? null;
+                        // The review page walks each sequence by absolute index,
+                        // so a card passes its position within its own sequence
+                        // (cases or captures), never its place in the merged grid.
+                        const reviewParams = toReviewParams(
+                            gridFilters,
+                            (capture ? captureIndexById.get(sub.id) : seqIndexById.get(sub.id)) ?? 0,
+                            capture ? captures.length : total
+                        );
+                        if (capture) reviewParams.set(CAPTURE_SOURCE_PARAM, CAPTURE_SOURCE_VALUE);
                         reviewParams.set("id", sub.id);
                         const reviewHref = `/detections/review?${reviewParams.toString()}`;
 
@@ -900,6 +1248,9 @@ export default function DetectionsPage() {
                                             <video
                                                 src={videoUrl}
                                                 muted
+                                                onVolumeChange={(e) => {
+                                                    if (!e.currentTarget.muted) e.currentTarget.muted = true;
+                                                }}
                                                 playsInline
                                                 preload="metadata"
                                                 className="w-full h-full object-cover"
@@ -940,21 +1291,42 @@ export default function DetectionsPage() {
                                             <h3 className="font-extrabold text-[#0F172A] text-sm tracking-tight capitalize truncate">
                                                 {sub.detection_type?.replace(/_/g, " ") || "Traffic Violation"}
                                             </h3>
-                                            <span className="text-[10px] font-mono font-bold text-[#64748B] bg-[#F1F5F9] px-2 py-0.5 rounded">
-                                                {sub.beats_earned ? `${sub.beats_earned} beats` : "0.20 beats"}
-                                            </span>
+                                            {/* A capture earns nobody beats, so it has no beats pill. */}
+                                            {!capture && (
+                                                <span className="text-[10px] font-mono font-bold text-[#64748B] bg-[#F1F5F9] px-2 py-0.5 rounded">
+                                                    {sub.beats_earned ? `${sub.beats_earned} beats` : "0.20 beats"}
+                                                </span>
+                                            )}
                                         </div>
 
-                                        <div className="flex items-center gap-3 text-[11px] text-[#64748B] font-medium mt-1.5">
-                                            <span className="flex items-center gap-1">
-                                                <User className="w-3 h-3 text-[#94A3B8]" />
-                                                {sub.username || "Scout"}
-                                            </span>
-                                            <span>•</span>
-                                            <span className="flex items-center gap-1">
-                                                <MapPin className="w-3 h-3 text-[#94A3B8]" />
-                                                {sub.country_code === "IN" ? "India" : sub.country_code || "IN"}
-                                            </span>
+                                        <div className="flex items-center gap-3 text-[11px] text-[#64748B] font-medium mt-1.5 min-w-0">
+                                            {capture ? (
+                                                // Provenance for a capture is the video and the moment
+                                                // in it, the way a case's is its scout and location.
+                                                <>
+                                                    <span className="flex items-center gap-1 min-w-0">
+                                                        <Film className="w-3 h-3 text-[#94A3B8] shrink-0" />
+                                                        <span className="truncate">{capture.source_name || "Video"}</span>
+                                                    </span>
+                                                    <span>•</span>
+                                                    <span className="flex items-center gap-1 shrink-0">
+                                                        <Clock className="w-3 h-3 text-[#94A3B8]" />
+                                                        {describeCapturePosition(capture)}
+                                                    </span>
+                                                </>
+                                            ) : (
+                                                <>
+                                                    <span className="flex items-center gap-1">
+                                                        <User className="w-3 h-3 text-[#94A3B8]" />
+                                                        {sub.username || "Scout"}
+                                                    </span>
+                                                    <span>•</span>
+                                                    <span className="flex items-center gap-1">
+                                                        <MapPin className="w-3 h-3 text-[#94A3B8]" />
+                                                        {sub.country_code === "IN" ? "India" : sub.country_code || "IN"}
+                                                    </span>
+                                                </>
+                                            )}
                                         </div>
                                     </div>
 
@@ -962,8 +1334,14 @@ export default function DetectionsPage() {
                                     <div className="flex items-center gap-2 pt-2 border-t border-[#F1F5F9]">
                                         <button
                                             onClick={(e) => handleVerify(sub, e)}
+                                            // A capture was validated when it was saved and has no
+                                            // court-ready question to answer, so there is nothing
+                                            // for this button to do.
+                                            disabled={!!capture}
+                                            title={capture ? "Validated when it was captured" : undefined}
                                             className={cn(
-                                                "flex-1 py-2 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer",
+                                                "flex-1 py-2 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all",
+                                                capture ? "cursor-default" : "cursor-pointer",
                                                 sub.verification_status === "verified"
                                                     ? "bg-[#D1FAE5] text-[#065F46]"
                                                     : "bg-[#00DF89] hover:bg-[#00DF89]/90 text-slate-950 shadow-sm"
@@ -973,17 +1351,51 @@ export default function DetectionsPage() {
                                             <span>{sub.verification_status === "verified" ? "Validated" : "Validate"}</span>
                                         </button>
 
+                                        {/* The second decision on validated evidence: does this
+                                            image stand as court evidence? */}
+                                        {sub.verification_status === "verified" && (
+                                            <button
+                                                onClick={(e) =>
+                                                    void setCourtReady(sub, sub.review_status !== REVIEW_COURT_READY, e)
+                                                }
+                                                disabled={savingId === sub.id}
+                                                title={
+                                                    sub.review_status === REVIEW_COURT_READY
+                                                        ? "Filed as court ready. Click to take it back."
+                                                        : "Add this image to court ready"
+                                                }
+                                                className={cn(
+                                                    "flex-1 py-2 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer disabled:opacity-50",
+                                                    sub.review_status === REVIEW_COURT_READY
+                                                        ? "bg-[#1D4ED8] text-white shadow-sm"
+                                                        : "bg-[#EFF6FF] hover:bg-[#DBEAFE] text-[#1D4ED8] border border-[#BFDBFE]"
+                                                )}
+                                            >
+                                                {savingId === sub.id ? (
+                                                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                                ) : (
+                                                    <Gavel className="w-3.5 h-3.5" />
+                                                )}
+                                                <span>Court ready</span>
+                                            </button>
+                                        )}
+
                                         <button
-                                            onClick={(e) => handleDismiss(sub, e)}
+                                            onClick={(e) => (capture ? void removeCapture(sub, e) : handleDismiss(sub, e))}
+                                            disabled={savingId === sub.id}
                                             className={cn(
-                                                "py-2 px-3 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center justify-center",
+                                                "py-2 px-3 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center justify-center disabled:opacity-50",
                                                 sub.verification_status === "rejected"
                                                     ? "bg-[#FEE2E2] text-[#991B1B]"
                                                     : "bg-[#F1F5F9] hover:bg-[#E2E8F0] text-[#64748B]"
                                             )}
                                             title="Dismiss violation"
                                         >
-                                            <X className="w-3.5 h-3.5" />
+                                            {savingId === sub.id ? (
+                                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                            ) : (
+                                                <X className="w-3.5 h-3.5" />
+                                            )}
                                         </button>
                                     </div>
                                 </div>
@@ -1022,25 +1434,10 @@ export default function DetectionsPage() {
 
             {!isLoading && !hasMore && displaySubmissions.length > 0 && (
                 <p className="py-8 text-center text-xs font-semibold text-[#94A3B8]">
-                    End of queue &mdash; {total.toLocaleString()}{" "}
-                    {total === 1 ? "record" : "records"}
+                    End of queue &mdash; {displayTotal.toLocaleString()}{" "}
+                    {displayTotal === 1 ? "record" : "records"}
                 </p>
             )}
-
-            <CourtReadyDialog
-                caseLabel={courtPromptFor ? courtPromptFor.id : null}
-                isSaving={savingId !== null && savingId === courtPromptFor?.id}
-                onAnswer={(courtReady) => {
-                    const sub = courtPromptFor;
-                    if (!sub) return;
-                    // Stay open through the save so the spinner is visible.
-                    void applyDecision(sub, "verified", undefined, courtReady).finally(() =>
-                        setCourtPromptFor(null)
-                    );
-                }}
-                onCancel={() => setCourtPromptFor(null)}
-            />
-
         </div>
     );
 }

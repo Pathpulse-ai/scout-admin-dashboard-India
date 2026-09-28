@@ -135,3 +135,10 @@ body {
 [data-theme='dark'] ::-webkit-scrollbar-thumb {
   background: #334155;
 }
+/* Silent players: previews and captures are muted and offer no volume control. */
+video[data-silent]::-webkit-media-controls-mute-button,
+video[data-silent]::-webkit-media-controls-volume-slider,
+video[data-silent]::-webkit-media-controls-volume-control-container,
+video[data-silent]::-webkit-media-controls-volume-slider-container {
+  display: none !important;
+}

@@ -1,6 +1,7 @@
 import { pool } from './db';
 import { CLASS_SIZE_TTL_MS, cached } from './queryCache';
 import { GEO_VERSION, indiaGeoPredicate } from './region';
+import { BATCH_SIZE } from './detectionFilters';
 
 /**
  * Large classes are split into fixed, named work packets.
@@ -14,7 +15,7 @@ import { GEO_VERSION, indiaGeoPredicate } from './region';
  * to a (captured_at, id) pair through the index, whereas OFFSET 20000 makes it
  * walk and geo-test every skipped row: 22 seconds versus 13 milliseconds.
  */
-export const BATCH_SIZE = 5000;
+export { BATCH_SIZE };
 
 /** A class smaller than this is left whole; splitting it would be noise. */
 export const MIN_ROWS_TO_BATCH = BATCH_SIZE;
