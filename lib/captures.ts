@@ -143,3 +143,25 @@ export function mergeCapturesByTime(
     }
     return out;
 }
+
+/**
+ * The captures that belong on one page of cases, when the merged list is
+ * paged by its cases.
+ *
+ * A capture sits in front of the first case no newer than it, so it belongs
+ * on the page holding that case. Everything older than the last case of the
+ * page before is a candidate here; the merge then slots what fits between
+ * this page's cases and, on the last page, appends the rest. `before` is that
+ * previous case's captured_at, or null on the first page, where every capture
+ * newer than the first case lands at the top.
+ */
+export function capturesForPage(
+    captures: Submission[],
+    pageCases: Submission[],
+    before: string | null,
+    isLastPage: boolean
+): Submission[] {
+    const limit = before ? Date.parse(before) : Number.POSITIVE_INFINITY;
+    const candidates = captures.filter((c) => Date.parse(c.captured_at) < limit);
+    return mergeCapturesByTime(pageCases, candidates, !isLastPage);
+}

@@ -7,8 +7,9 @@ import { formatDetectionTypeLabel } from "@/lib/detectionLabels";
 
 /**
  * "Which class is this?" — shown right after an officer captures a frame or a
- * clip. The capture is previewed so the label is applied to what was actually
- * taken, not to whatever the video has moved on to.
+ * clip, and again from the review page when a filed record turns out to be
+ * under the wrong class. The media is previewed so the label is applied to
+ * what is actually on screen, not to whatever the video has moved on to.
  */
 export interface ClassLabelDialogProps {
     open: boolean;
@@ -16,7 +17,16 @@ export interface ClassLabelDialogProps {
     subtitle?: string;
     preview: { kind: "frame" | "clip"; url: string } | null;
     classes: { detection_type: string; total?: number }[];
+    /**
+     * The class the record carries now, when one is being changed. It is
+     * listed but cannot be picked again, and Enter skips past it.
+     */
+    currentClass?: string | null;
     isSaving: boolean;
+    /** Footer wording while the save runs; defaults to the capture flow's. */
+    savingLabel?: string;
+    /** What Esc does, shown beside the key; defaults to the capture flow's. */
+    cancelLabel?: string;
     onSelect: (detectionType: string) => void;
     onCancel: () => void;
 }
@@ -27,7 +37,10 @@ export default function ClassLabelDialog({
     subtitle,
     preview,
     classes,
+    currentClass = null,
     isSaving,
+    savingLabel = "Saving to validated images\u2026",
+    cancelLabel = "discard capture",
     onSelect,
     onCancel,
 }: ClassLabelDialogProps) {
@@ -48,6 +61,15 @@ export default function ClassLabelDialog({
         );
     }, [classes, query]);
 
+    // The row Enter would take: the first match that is not the class the
+    // record already has. Highlighted only once a filter is typed, so Enter
+    // never saves under a class the officer could not see was selected.
+    const firstPick = useMemo(
+        () => matches.find((c) => c.detection_type !== currentClass) ?? null,
+        [matches, currentClass]
+    );
+    const highlighted = query.trim() ? firstPick?.detection_type ?? null : null;
+
     // Fresh search and focus each time the dialog opens.
     useEffect(() => {
         if (!open) return;
@@ -66,24 +88,19 @@ export default function ClassLabelDialog({
                 e.preventDefault();
                 e.stopPropagation();
                 onCancel();
-            } else if (
-                e.key === "Enter" &&
-                e.target === inputRef.current &&
-                query.trim() &&
-                matches.length > 0
-            ) {
+            } else if (e.key === "Enter" && e.target === inputRef.current && highlighted) {
                 // Only while typing a filter, and only once something is typed:
-                // the same condition that highlights the top row, so Enter never
+                // the same condition that highlights a row, so Enter never
                 // saves under a class the officer could not see was selected. A
                 // focused class button or Cancel keeps its own native Enter.
                 e.preventDefault();
                 e.stopPropagation();
-                onSelect(matches[0].detection_type);
+                onSelect(highlighted);
             }
         };
         window.addEventListener("keydown", onKey, { capture: true });
         return () => window.removeEventListener("keydown", onKey, { capture: true });
-    }, [open, isSaving, matches, query, onSelect, onCancel]);
+    }, [open, isSaving, highlighted, onSelect, onCancel]);
 
     if (!open) return null;
 
@@ -167,34 +184,48 @@ export default function ClassLabelDialog({
                             </p>
                         ) : (
                             <ul className="space-y-1">
-                                {matches.map((c, i) => (
-                                    <li key={c.detection_type}>
-                                        <button
-                                            onClick={() => onSelect(c.detection_type)}
-                                            disabled={isSaving}
-                                            className={cn(
-                                                "w-full flex items-center justify-between gap-3 px-3 py-2.5 rounded-xl text-left transition-colors cursor-pointer disabled:opacity-50",
-                                                i === 0 && query
-                                                    ? "bg-[#E6FAF2] border border-[#A7F3D0]"
-                                                    : "hover:bg-[#F8FAFC] border border-transparent"
-                                            )}
-                                        >
-                                            <span className="min-w-0">
-                                                <span className="block text-sm font-bold text-[#0F172A] truncate">
-                                                    {formatDetectionTypeLabel(c.detection_type)}
+                                {matches.map((c) => {
+                                    const isCurrent = c.detection_type === currentClass;
+                                    return (
+                                        <li key={c.detection_type}>
+                                            <button
+                                                onClick={() => onSelect(c.detection_type)}
+                                                disabled={isSaving || isCurrent}
+                                                aria-current={isCurrent ? "true" : undefined}
+                                                className={cn(
+                                                    "w-full flex items-center justify-between gap-3 px-3 py-2.5 rounded-xl text-left transition-colors",
+                                                    isCurrent
+                                                        ? "bg-[#F8FAFC] border border-[#E2E8F0] cursor-default"
+                                                        : c.detection_type === highlighted
+                                                          ? "bg-[#E6FAF2] border border-[#A7F3D0] cursor-pointer"
+                                                          : "hover:bg-[#F8FAFC] border border-transparent cursor-pointer",
+                                                    "disabled:opacity-60"
+                                                )}
+                                            >
+                                                <span className="min-w-0">
+                                                    <span className="block text-sm font-bold text-[#0F172A] truncate">
+                                                        {formatDetectionTypeLabel(c.detection_type)}
+                                                    </span>
+                                                    <span className="block text-[10px] font-mono text-[#94A3B8] truncate">
+                                                        {c.detection_type}
+                                                    </span>
                                                 </span>
-                                                <span className="block text-[10px] font-mono text-[#94A3B8] truncate">
-                                                    {c.detection_type}
+                                                <span className="flex items-center gap-2 shrink-0">
+                                                    {isCurrent && (
+                                                        <span className="text-[10px] font-bold text-[#475569] bg-[#E2E8F0] px-2 py-0.5 rounded-full">
+                                                            Current
+                                                        </span>
+                                                    )}
+                                                    {typeof c.total === "number" && (
+                                                        <span className="text-[10px] font-bold text-[#64748B] font-mono">
+                                                            {c.total.toLocaleString()}
+                                                        </span>
+                                                    )}
                                                 </span>
-                                            </span>
-                                            {typeof c.total === "number" && (
-                                                <span className="text-[10px] font-bold text-[#64748B] font-mono shrink-0">
-                                                    {c.total.toLocaleString()}
-                                                </span>
-                                            )}
-                                        </button>
-                                    </li>
-                                ))}
+                                            </button>
+                                        </li>
+                                    );
+                                })}
                             </ul>
                         )}
                     </div>
@@ -204,12 +235,12 @@ export default function ClassLabelDialog({
                             {isSaving ? (
                                 <>
                                     <Loader2 className="w-3.5 h-3.5 animate-spin text-[#00DF89]" />
-                                    Saving to validated images&hellip;
+                                    {savingLabel}
                                 </>
                             ) : (
                                 <>
                                     <kbd className="bg-[#F1F5F9] border border-[#E2E8F0] rounded px-1.5 py-0.5 font-mono text-[10px] text-[#0F172A]">Esc</kbd>
-                                    discard capture
+                                    {cancelLabel}
                                 </>
                             )}
                         </span>

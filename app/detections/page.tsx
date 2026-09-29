@@ -23,12 +23,13 @@ import {
 import { Submission, Stats, DetectionTypeCount, VerificationStatus } from "@/types";
 import { cn } from "@/lib/utils";
 import CourtReadyDialog from "@/components/detections/CourtReadyDialog";
+import Pager from "@/components/detections/Pager";
 import {
     CAPTURE_SOURCE_PARAM,
     CAPTURE_SOURCE_VALUE,
     VideoAnnotationItem,
     captureToSubmission,
-    mergeCapturesByTime,
+    capturesForPage,
 } from "@/lib/captures";
 import {
     DetectionFilters,
@@ -36,10 +37,14 @@ import {
     ReviewTab,
     parseFilters,
     GRID_BATCH_SIZE,
+    GRID_PAGE_SIZE,
     REVIEW_COURT_READY,
     batchIndexFor,
+    matchesTab,
+    offsetWithinBatch,
     parsePage,
     resolveDateFrom,
+    toGridParams,
     toReviewParams,
 } from "@/lib/detectionFilters";
 
@@ -101,13 +106,14 @@ export default function DetectionsPage() {
     const [violationType, setViolationType] = useState("");
     const [timeRange, setTimeRange] = useState("all");
     /**
-     * How many batches of the queue are on screen.
+     * Zero-based page of the queue on screen, GRID_PAGE_SIZE cards to a page.
      *
-     * The grid is a continuous list rather than pages: a reviewer asked to see
-     * all pending work, and 40,000 pending cases at 9 per page is 4,454 pages.
-     * Scrolling to the bottom appends the next batch.
+     * The grid is paged rather than scrolled so a position in the queue has a
+     * name: a reviewer can stop at page 12 and come back to it, or hand it to
+     * a colleague. Pages are cut from cached batches, so turning a page inside
+     * a batch costs no request.
      */
-    const [batchCount, setBatchCount] = useState(1);
+    const [page, setPage] = useState(0);
 
     /**
      * Large classes are split into fixed 5,000-image packets. '' is the whole
@@ -130,8 +136,8 @@ export default function DetectionsPage() {
         setTimeRange(restored.range);
         setSearchQuery(restored.q);
         setSelectedBatch(restored.batch);
-        // Coming back from a case: load enough batches to include where they were.
-        setBatchCount(batchIndexFor(parsePage(search)) + 1);
+        // Coming back from a case, or reloading: land on the page they were on.
+        setPage(parsePage(search));
         setIsHydrated(true);
     }, []);
 
@@ -282,53 +288,97 @@ export default function DetectionsPage() {
         [filterKey, buildParams]
     );
 
+    /**
+     * captured_at of the case just before this page: null on the first page,
+     * undefined while the batch holding it is still on its way. It is the
+     * line the captures shown at the top of this page are cut on.
+     */
+    const [boundary, setBoundary] = useState<string | null | undefined>(null);
+
     const fetchSubmissions = useCallback(async () => {
-        const wanted = Array.from({ length: batchCount }, (_, i) => i);
-        const allCached = wanted.every((i) => batchCacheRef.current.has(`${filterKey}#${i}`));
+        const batchIndex = batchIndexFor(page);
+        const key = `${filterKey}#${batchIndex}`;
 
         // Only show the skeleton for a real fetch; cached rows should be instant.
-        if (!allCached) setIsLoading(true);
+        if (!batchCacheRef.current.has(key)) setIsLoading(true);
 
         try {
-            await Promise.all(wanted.map((i) => loadBatch(i)));
-            const rows = wanted.flatMap((i) => batchCacheRef.current.get(`${filterKey}#${i}`) ?? []);
-            setSubmissions(rows);
+            await loadBatch(batchIndex);
+            const batch = batchCacheRef.current.get(key) ?? [];
+            const start = offsetWithinBatch(page);
+            setSubmissions(batch.slice(start, start + GRID_PAGE_SIZE));
             setTotal(totalCacheRef.current.get(filterKey) ?? 0);
+
+            if (page === 0) {
+                setBoundary(null);
+            } else if (start > 0) {
+                setBoundary(batch[start - 1]?.captured_at);
+            } else {
+                // First page of a batch: the case before it closed the batch
+                // before, which the prefetch below brings in when it is not held.
+                const previous = batchCacheRef.current.get(`${filterKey}#${batchIndex - 1}`);
+                setBoundary(previous?.[previous.length - 1]?.captured_at);
+            }
         } catch {
             setSubmissions([]);
             setTotal(totalCacheRef.current.get(filterKey) ?? 0);
         } finally {
             setIsLoading(false);
         }
-    }, [batchCount, filterKey, loadBatch]);
+    }, [page, filterKey, loadBatch]);
 
-    const loadedCount = submissions.length;
-    const hasMore = total > 0 && loadedCount < total;
+    const pageCount = Math.max(1, Math.ceil(total / GRID_PAGE_SIZE));
 
-    /** Appending happens when the sentinel below the last card scrolls into view. */
-    const sentinelRef = useRef<HTMLDivElement | null>(null);
+    // A stale page number (an old link, a class that shrank) lands on the
+    // last page rather than on an empty one. Only once the total is known:
+    // before the first fetch it is still zero.
     useEffect(() => {
-        if (!isHydrated || isLoading || !hasMore) return;
-        const node = sentinelRef.current;
-        if (!node) return;
+        if (total > 0 && page > pageCount - 1) setPage(pageCount - 1);
+    }, [total, page, pageCount]);
 
-        const observer = new IntersectionObserver(
-            (entries) => {
-                if (entries.some((e) => e.isIntersecting)) {
-                    setBatchCount((n) => n + 1);
-                }
-            },
-            // Start fetching before the sentinel is actually visible.
-            { rootMargin: "600px" }
-        );
-        observer.observe(node);
-        return () => observer.disconnect();
-    }, [isHydrated, isLoading, hasMore, loadedCount, activeTab]);
-
-    // A filter change collapses the list back to a single batch.
+    /**
+     * Neighbouring batches, pulled in the background.
+     *
+     * The batch after this one, once the cursor is on its last page, so Next
+     * does not stall on the multi-second ordering query. And the batch before
+     * it, when this is the first page of a batch, because that batch's last
+     * case is the boundary the captures at the top of this page are cut on.
+     */
     useEffect(() => {
-        setBatchCount(1);
-    }, [filterKey]);
+        if (!isHydrated || isLoading) return;
+        const batchIndex = batchIndexFor(page);
+        const start = offsetWithinBatch(page);
+        let cancelled = false;
+
+        if (page > 0 && start === 0 && !batchCacheRef.current.has(`${filterKey}#${batchIndex - 1}`)) {
+            loadBatch(batchIndex - 1)
+                .then(() => {
+                    if (cancelled) return;
+                    const previous = batchCacheRef.current.get(`${filterKey}#${batchIndex - 1}`);
+                    setBoundary(previous?.[previous.length - 1]?.captured_at);
+                })
+                .catch(() => {
+                    // The page stands as rendered; the boundary stays unknown.
+                });
+        }
+
+        if (start === GRID_BATCH_SIZE - GRID_PAGE_SIZE && (batchIndex + 1) * GRID_BATCH_SIZE < total) {
+            loadBatch(batchIndex + 1).catch(() => {
+                // A failed prefetch is silent; turning the page will retry.
+            });
+        }
+
+        return () => {
+            cancelled = true;
+        };
+    }, [isHydrated, isLoading, page, filterKey, total, loadBatch]);
+
+    /** The top of the grid, brought back into view on every page turn. */
+    const gridTopRef = useRef<HTMLDivElement | null>(null);
+    const goToPage = useCallback((next: number) => {
+        setPage(next);
+        gridTopRef.current?.scrollIntoView({ block: "start", behavior: "smooth" });
+    }, []);
 
     useEffect(() => {
         fetchStats();
@@ -343,17 +393,58 @@ export default function DetectionsPage() {
         // The debounce exists to keep typing in the search box from firing a
         // request per keystroke. A page already held in the batch cache needs
         // no request at all, so it should not pay that delay.
-        const allCached = Array.from({ length: batchCount }, (_, i) => i).every((i) =>
-            batchCacheRef.current.has(`${filterKey}#${i}`)
-        );
-        if (allCached) {
+        if (batchCacheRef.current.has(`${filterKey}#${batchIndexFor(page)}`)) {
             void fetchSubmissions();
             return;
         }
 
         const timer = setTimeout(fetchSubmissions, 350);
         return () => clearTimeout(timer);
-    }, [fetchSubmissions, isHydrated, filterKey, batchCount, activeTab]);
+    }, [fetchSubmissions, isHydrated, filterKey, page]);
+
+    /**
+     * Mirror the page and filters into the URL as they change, so a reload or
+     * a bookmark lands on the same page and Back from a case does too.
+     * replaceState rather than the router: the page keeps its mount, its
+     * caches, and a single history entry.
+     */
+    useEffect(() => {
+        if (!isHydrated) return;
+        const params = toGridParams(
+            {
+                tab: activeTab as ReviewTab,
+                type: violationType,
+                range: timeRange as ReviewRange,
+                from: resolveDateFrom(timeRange as ReviewRange),
+                q: searchQuery.trim(),
+                batch: selectedBatch,
+            },
+            page
+        );
+        const query = params.toString();
+        const next = `${window.location.pathname}${query ? `?${query}` : ""}`;
+        if (next !== `${window.location.pathname}${window.location.search}`) {
+            window.history.replaceState(null, "", next);
+        }
+    }, [isHydrated, activeTab, violationType, timeRange, searchQuery, selectedBatch, page]);
+
+    /**
+     * Keep the held batches in step with a decision, so paging back shows it.
+     * A record that has left the open tab shifts every row after it on the
+     * server, so the batches are dropped and the next page turn refetches.
+     */
+    const reflectDecision = (id: string, change: (s: Submission) => Submission, leftTab: boolean) => {
+        if (leftTab) {
+            batchCacheRef.current.clear();
+            totalCacheRef.current.set(filterKey, Math.max(0, (totalCacheRef.current.get(filterKey) ?? 1) - 1));
+            return;
+        }
+        for (const [key, rows] of batchCacheRef.current) {
+            if (rows.some((s) => s.id === id)) {
+                batchCacheRef.current.set(key, rows.map((s) => (s.id === id ? change(s) : s)));
+            }
+        }
+    };
 
     // Handle Actions
     //
@@ -495,20 +586,22 @@ export default function DetectionsPage() {
                 review_status: string | null;
             };
 
-            setSubmissions((prev) =>
-                prev.map((s) =>
-                    s.id === sub.id
-                        ? {
-                              ...s,
-                              verification_status: saved.verification_status,
-                              rejection_reason: saved.rejection_reason,
-                              verified_at: saved.verified_at,
-                              court_ready: saved.court_ready,
-                              review_status: saved.review_status,
-                          }
-                        : s
-                )
-            );
+            const change = (s: Submission): Submission => ({
+                ...s,
+                verification_status: saved.verification_status,
+                rejection_reason: saved.rejection_reason,
+                verified_at: saved.verified_at,
+                court_ready: saved.court_ready,
+                review_status: saved.review_status,
+            });
+            setSubmissions((prev) => prev.map((s) => (s.id === sub.id ? change(s) : s)));
+            // The card stays on screen wearing its new status; only the cache
+            // and the count learn that it no longer belongs to this tab.
+            const leftTab =
+                matchesTab(activeTab as ReviewTab, before, sub.review_status) &&
+                !matchesTab(activeTab as ReviewTab, saved.verification_status, saved.review_status);
+            reflectDecision(sub.id, change, leftTab);
+            if (leftTab) setTotal((t) => Math.max(0, t - 1));
             applyStatsDelta(before, saved.verification_status);
         } catch (err) {
             setActionError((err as Error)?.message ?? "Could not save this decision.");
@@ -572,6 +665,11 @@ export default function DetectionsPage() {
             if (isCapture) setCaptures(update);
             else {
                 setSubmissions(update);
+                reflectDecision(
+                    sub.id,
+                    (s) => ({ ...s, review_status: reviewStatus, court_ready: isCourt }),
+                    leavesTab
+                );
                 if (leavesTab) setTotal((t) => Math.max(0, t - 1));
             }
 
@@ -607,18 +705,30 @@ export default function DetectionsPage() {
         return (type.verified ?? 0) + (type.captures ?? 0);
     };
 
-    // Filtering and paging are done server-side; render exactly what came
-    // back, with the Validated tab's captures slotted in by time. A capture
-    // carries no queue index: the review page opens it on its own.
+    // Filtering and paging are done server-side; render exactly the page that
+    // came back, with the captures that fall in its span of time slotted in.
+    // Until the batch before this one is held, the page's own first case
+    // stands in for the boundary, which can only hold back a capture timed in
+    // the gap between the two pages, and only until that batch arrives.
+    const isLastPage = page >= pageCount - 1;
     const displaySubmissions =
-        activeTab === "verified" && captures.length > 0
-            ? mergeCapturesByTime(submissions, captures, hasMore)
+        captures.length > 0
+            ? capturesForPage(
+                  captures,
+                  submissions,
+                  boundary === undefined ? (submissions[0]?.captured_at ?? null) : boundary,
+                  isLastPage
+              )
             : submissions;
-    const seqIndexById = new Map(submissions.map((s, i) => [s.id, i] as const));
+    // A card hands the review page its absolute position in the sequence:
+    // the page's offset plus its place on the page.
+    const seqIndexById = new Map(
+        submissions.map((s, i) => [s.id, page * GRID_PAGE_SIZE + i] as const)
+    );
     // Captures walk a sequence of their own on the review page, in exactly
     // this order, so a card hands over its position among the captures.
     const captureIndexById = new Map(captures.map((c, i) => [c.id, i] as const));
-    const displayTotal = total + (activeTab === "verified" ? captures.length : 0);
+    const displayTotal = total + captures.length;
 
     // Exactly the filter set the API call used, handed to the review page so it
     // walks the same ordered sequence.
@@ -680,7 +790,10 @@ export default function DetectionsPage() {
                         type="text"
                         placeholder="Search case ID or violation"
                         value={searchQuery}
-                        onChange={(e) => setSearchQuery(e.target.value)}
+                        onChange={(e) => {
+                            setSearchQuery(e.target.value);
+                            setPage(0);
+                        }}
                         className="w-full bg-white border border-[#E2E8F0] rounded-2xl pl-10 pr-4 py-2.5 text-sm font-medium text-[#0F172A] placeholder:text-[#94A3B8] focus:outline-none focus:ring-2 focus:ring-[#00DF89]/30 focus:border-[#00DF89] shadow-sm transition-all"
                     />
                 </div>
@@ -766,7 +879,7 @@ export default function DetectionsPage() {
                                 key={tab.id}
                                 onClick={() => {
                                     setActiveTab(tab.id);
-                                    setBatchCount(1);
+                                    setPage(0);
                                 }}
                                 className={cn(
                                     "px-4 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer",
@@ -790,7 +903,7 @@ export default function DetectionsPage() {
                             onChange={(e) => {
                                 setViolationType(e.target.value);
                                 setSelectedBatch("");
-                                setBatchCount(1);
+                                setPage(0);
                             }}
                             className="appearance-none bg-white border border-[#E2E8F0] rounded-xl px-4 py-2 pr-9 text-xs font-semibold text-[#0F172A] focus:outline-none focus:ring-2 focus:ring-[#00DF89]/30 cursor-pointer shadow-sm"
                         >
@@ -812,7 +925,7 @@ export default function DetectionsPage() {
                                 value={selectedBatch}
                                 onChange={(e) => {
                                     setSelectedBatch(e.target.value);
-                                    setBatchCount(1);
+                                    setPage(0);
                                 }}
                                 className="appearance-none bg-white border border-[#E2E8F0] rounded-xl px-4 py-2 pr-9 text-xs font-semibold text-[#0F172A] focus:outline-none focus:ring-2 focus:ring-[#00DF89]/30 cursor-pointer shadow-sm"
                             >
@@ -836,7 +949,7 @@ export default function DetectionsPage() {
                             <Calendar className="w-3.5 h-3.5 text-[#94A3B8]" />
                             <select
                                 value={timeRange}
-                                onChange={(e) => { setTimeRange(e.target.value); setBatchCount(1); }}
+                                onChange={(e) => { setTimeRange(e.target.value); setPage(0); }}
                                 className="appearance-none bg-transparent pr-5 text-xs font-semibold text-[#0F172A] focus:outline-none cursor-pointer"
                             >
                                 <option value="all">All time</option>
@@ -851,10 +964,14 @@ export default function DetectionsPage() {
             </div>
 
             {/* Evidence Records Counter matching image */}
-            <div className="flex items-center justify-between text-xs text-[#64748B] font-semibold px-1">
+            <div
+                ref={gridTopRef}
+                className="flex items-center justify-between text-xs text-[#64748B] font-semibold px-1 scroll-mt-24"
+            >
                 <span>
-                    Showing {displaySubmissions.length.toLocaleString()} of{" "}
-                    {displayTotal.toLocaleString()} matching records
+                    Page {(page + 1).toLocaleString()} of {pageCount.toLocaleString()}
+                    {" \u00b7 "}
+                    {displayTotal.toLocaleString()} matching {displayTotal === 1 ? "record" : "records"}
                     {selectedBatch && (
                         <span className="text-[#1D4ED8]">
                             {" "}
@@ -1103,21 +1220,14 @@ export default function DetectionsPage() {
                 onCancel={() => setCourtPromptFor(null)}
             />
 
-            {/* Sentinel: scrolling near it appends the next batch */}
-            {!isLoading && hasMore && (
-                <div ref={sentinelRef} className="py-8 flex items-center justify-center gap-2">
-                    <Loader2 className="w-4 h-4 text-[#00DF89] animate-spin" />
-                    <span className="text-xs font-bold text-[#64748B] uppercase tracking-widest">
-                        Loading more evidence&hellip;
-                    </span>
-                </div>
+            {!isLoading && displaySubmissions.length === 0 && (
+                <p className="py-8 text-center text-xs font-semibold text-[#94A3B8]">
+                    No records match these filters.
+                </p>
             )}
 
-            {!isLoading && !hasMore && displaySubmissions.length > 0 && (
-                <p className="py-8 text-center text-xs font-semibold text-[#94A3B8]">
-                    End of queue &mdash; {displayTotal.toLocaleString()}{" "}
-                    {displayTotal === 1 ? "record" : "records"}
-                </p>
+            {pageCount > 1 && (
+                <Pager page={page} pageCount={pageCount} disabled={isLoading} onChange={goToPage} />
             )}
         </div>
     );

@@ -14,10 +14,12 @@ import {
     Keyboard,
     Loader2,
     MapPin,
+    Tag,
     TriangleAlert,
     X,
 } from "lucide-react";
-import { Submission, VerificationStatus } from "@/types";
+import { DetectionTypeCount, Submission, VerificationStatus } from "@/types";
+import ClassLabelDialog from "@/components/detections/ClassLabelDialog";
 import CourtReadyDialog from "@/components/detections/CourtReadyDialog";
 import { cn } from "@/lib/utils";
 import { formatBytes } from "@/lib/videoLibrary";
@@ -150,6 +152,31 @@ export default function ReviewClient() {
 
     /** Set while the court-ready question is on screen. */
     const [courtPromptFor, setCourtPromptFor] = useState<string | null>(null);
+
+    /** Set while the class picker is on screen, to the record being re-classed. */
+    const [classPromptFor, setClassPromptFor] = useState<string | null>(null);
+
+    /**
+     * Every class in the data, for the picker. Loaded once with the page: it
+     * is one small, server-cached request, and the picker then opens at once.
+     */
+    const [classes, setClasses] = useState<DetectionTypeCount[]>([]);
+    useEffect(() => {
+        let cancelled = false;
+        (async () => {
+            try {
+                const res = await fetch("/api/detection-types");
+                if (!res.ok) return;
+                const data = (await res.json()) as DetectionTypeCount[];
+                if (!cancelled) setClasses(Array.isArray(data) ? data : []);
+            } catch {
+                // The picker shows an empty list; nothing else on the page needs it.
+            }
+        })();
+        return () => {
+            cancelled = true;
+        };
+    }, []);
 
     /**
      * Absolute indices whose record left the server-side filter after a
@@ -623,12 +650,92 @@ export default function ReviewClient() {
         [runAction]
     );
 
+    /** Open the class picker on the record in view. */
+    const askClass = useCallback(() => {
+        const target = isStandalone ? items[0] : items[index - windowStart];
+        if (!target || actingRef.current) return;
+        setActionError(null);
+        setClassPromptFor(target.id);
+    }, [items, index, windowStart, isStandalone]);
+
+    /**
+     * Move the open record to another class.
+     *
+     * A scout case and a capture keep their class in different tables, so each
+     * goes through its own endpoint. Under a class filter the record has just
+     * left the sequence, which is handled the same way as a court-ready
+     * take-back under the Court ready tab: count it as removed and step on.
+     */
+    const changeClass = useCallback(
+        async (nextType: string) => {
+            const target = isStandalone ? items[0] : items[index - windowStart];
+            if (!target || actingRef.current) return;
+            if (nextType === target.detection_type) {
+                setClassPromptFor(null);
+                return;
+            }
+
+            actingRef.current = true;
+            setIsActing(true);
+            setActionError(null);
+
+            const targetId = target.id;
+            const targetIndex = index;
+            // The record's own kind, not the sequence's: it picks the endpoint.
+            const targetIsCapture = Boolean(target.capture);
+
+            try {
+                const res = await fetch(
+                    targetIsCapture ? `/api/annotations/${targetId}` : `/api/submissions/${targetId}`,
+                    {
+                        method: "PATCH",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ detection_type: nextType }),
+                    }
+                );
+                if (!res.ok) {
+                    const detail = (await res.json().catch(() => null)) as { error?: string } | null;
+                    throw new Error(detail?.error ?? `Update failed (HTTP ${res.status})`);
+                }
+                const saved = (await res.json()) as {
+                    detection_type?: string;
+                    annotation?: { detection_type: string };
+                };
+                const savedType =
+                    (targetIsCapture ? saved.annotation?.detection_type : saved.detection_type) ?? nextType;
+
+                setItems((prev) =>
+                    prev.map((s) => (s.id === targetId ? { ...s, detection_type: savedType } : s))
+                );
+
+                // Only a class filter can drop the record out of the open sequence.
+                if (!isStandalone && filters.type && filters.type !== savedType) {
+                    if (isCapture) {
+                        dropFromSequence(targetId);
+                    } else {
+                        removedRef.current.add(targetIndex);
+                        goBy(1);
+                    }
+                }
+            } catch (err) {
+                setActionError((err as Error)?.message ?? "Could not change the class.");
+            } finally {
+                actingRef.current = false;
+                setIsActing(false);
+                // The error banner sits behind the picker, so close it either way.
+                setClassPromptFor(null);
+            }
+        },
+        [items, index, windowStart, isStandalone, isCapture, filters.type, goBy, dropFromSequence]
+    );
+
     // Latest-ref indirection: a handler registered once would otherwise close
     // over the index and items from first render forever.
     const handlerRef = useRef<(e: KeyboardEvent) => void>(() => {});
     useEffect(() => {
         handlerRef.current = (e: KeyboardEvent) => {
-            if (courtPromptFor !== null) return;
+            // A dialog on screen owns the keyboard.
+            if (courtPromptFor !== null || classPromptFor !== null) return;
             if (e.metaKey || e.ctrlKey || e.altKey) return;
             if (e.repeat) return;
 
@@ -645,16 +752,18 @@ export default function ReviewClient() {
             const isValidate = e.key === "1" || e.code === "Numpad1";
             const isDismiss = e.key === "2" || e.code === "Numpad2";
             const isCourt = e.key === "3" || e.code === "Numpad3";
+            const isClass = e.key === "4" || e.code === "Numpad4";
 
             // Only the bound keys are cancelled, so Space still plays the
             // focused clip and the other arrows still scroll.
-            if (!isPrev && !isNext && !isValidate && !isDismiss && !isCourt) return;
+            if (!isPrev && !isNext && !isValidate && !isDismiss && !isCourt && !isClass) return;
             e.preventDefault();
             e.stopPropagation();
 
             if (isPrev) goBy(-1);
             else if (isNext) goBy(1);
             else if (isValidate) askCourtReady();
+            else if (isClass) askClass();
             else if (isCourt) {
                 if (current?.verification_status === "verified") {
                     void setCourtReady(current.review_status !== REVIEW_COURT_READY);
@@ -729,6 +838,7 @@ export default function ReviewClient() {
                     { keys: "1", label: "Validate" },
                     { keys: "2", label: "Dismiss" },
                     { keys: "3", label: "Court ready" },
+                    { keys: "4", label: "Change class" },
                 ].map((hint) => (
                     <span key={hint.label} className="flex items-center gap-1.5 text-[11px] font-semibold text-[#475569]">
                         <kbd className="bg-[#F1F5F9] border border-[#E2E8F0] rounded px-1.5 py-0.5 font-mono font-bold text-[10px] text-[#0F172A] min-w-[20px] text-center">
@@ -882,6 +992,19 @@ export default function ReviewClient() {
                     </button>
                 )}
 
+                {/* The record is under the wrong class: move it, keeping every
+                    verdict already filed on it. */}
+                <button
+                    onClick={askClass}
+                    disabled={!current || isActing}
+                    title="Move this record to another class"
+                    className="flex-1 py-3.5 rounded-2xl font-bold text-xs flex items-center justify-center gap-2 transition-all cursor-pointer disabled:opacity-50 disabled:pointer-events-none bg-white hover:bg-[#F8FAFC] text-[#0F172A] border border-[#E2E8F0] hover:border-[#CBD5E1]"
+                >
+                    <Tag className="w-4 h-4" />
+                    <span>Change class</span>
+                    <kbd className="bg-[#F1F5F9] border border-[#E2E8F0] rounded px-1.5 py-0.5 font-mono text-[10px]">4</kbd>
+                </button>
+
                 <button
                     onClick={() => (capture ? void removeCapture() : void runAction("rejected"))}
                     disabled={!current || isActing}
@@ -962,6 +1085,32 @@ export default function ReviewClient() {
                 isSaving={isActing}
                 onAnswer={(courtReady) => void answerCourtReady(courtReady)}
                 onCancel={() => setCourtPromptFor(null)}
+            />
+
+            {/* The same picker the capture flow uses, previewing the media in
+                view so the new class is applied to what is actually on screen. */}
+            <ClassLabelDialog
+                open={classPromptFor !== null}
+                title="Change class"
+                subtitle={
+                    current
+                        ? `Filed as ${formatDetectionTypeLabel(current.detection_type)}. Pick the class this evidence belongs to; its validated and court-ready status stay as they are.`
+                        : undefined
+                }
+                preview={
+                    videoUrl
+                        ? { kind: "clip", url: videoUrl }
+                        : imageUrl
+                          ? { kind: "frame", url: imageUrl }
+                          : null
+                }
+                classes={classes}
+                currentClass={current?.detection_type ?? null}
+                isSaving={isActing}
+                savingLabel="Moving to the new class\u2026"
+                cancelLabel="keep the current class"
+                onSelect={(type) => void changeClass(type)}
+                onCancel={() => setClassPromptFor(null)}
             />
         </div>
     );
